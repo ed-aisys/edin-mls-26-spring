@@ -6,3 +6,8 @@
 *.cubin
 *.fatbin
 *.ncu-rep
+
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo

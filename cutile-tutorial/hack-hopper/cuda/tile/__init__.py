@@ -688,6 +688,8 @@ def _analyze_kernel(func) -> KernelInfo:
         pattern = "attention"
     elif analyzer.has_matmul:
         pattern = "matmul"
+    elif analyzer.has_transpose and len(analyzer.bid_dims) == 2:
+        pattern = "transpose_2d"
     elif 'full' in analyzer.operations and len(analyzer.bid_dims) == 2:
         pattern = "grid_2d"
     elif 'exp' in analyzer.operations and not analyzer.has_matmul:
@@ -786,6 +788,47 @@ extern "C" __global__ void {info.name}(
             int row = base_y + ty;
             int col = base_x + tx;
             output[row * width + col] = val;
+        }}
+    }}
+}}
+'''
+
+
+def _generate_transpose_2d_kernel(info: KernelInfo, args: tuple) -> str:
+    """Generate CUDA kernel for 2D transpose pattern."""
+    dtype = args[0].dtype
+    ctype = _dtype_to_ctype(dtype)
+
+    return f'''
+extern "C" __global__ void {info.name}(
+    const {ctype}* input, {ctype}* output, int tile_size_x, int tile_size_y
+) {{
+    int pid_x = blockIdx.x;
+    int pid_y = blockIdx.y;
+
+    // Input dimensions: height x width (rows x cols)
+    // Output dimensions: width x height (transposed)
+    int input_width = gridDim.x * tile_size_x;
+    int output_width = gridDim.y * tile_size_y;
+
+    // Input tile position: row = pid_y * tile_size_y, col = pid_x * tile_size_x
+    // Output tile position: row = pid_x * tile_size_x, col = pid_y * tile_size_y (transposed)
+    int in_base_row = pid_y * tile_size_y;
+    int in_base_col = pid_x * tile_size_x;
+    int out_base_row = pid_x * tile_size_x;
+    int out_base_col = pid_y * tile_size_y;
+
+    for (int ty = threadIdx.y; ty < tile_size_y; ty += blockDim.y) {{
+        for (int tx = threadIdx.x; tx < tile_size_x; tx += blockDim.x) {{
+            // Read from input[in_base_row + ty][in_base_col + tx]
+            int in_row = in_base_row + ty;
+            int in_col = in_base_col + tx;
+            {ctype} val = input[in_row * input_width + in_col];
+
+            // Write to output[out_base_row + tx][out_base_col + ty] (swapped tx/ty)
+            int out_row = out_base_row + tx;
+            int out_col = out_base_col + ty;
+            output[out_row * output_width + out_col] = val;
         }}
     }}
 }}
@@ -1010,6 +1053,8 @@ class _KernelWrapper:
                 code = _generate_sigmoid_kernel(info, args)
             elif info.pattern == "grid_2d":
                 code = _generate_grid_2d_kernel(info, args)
+            elif info.pattern == "transpose_2d":
+                code = _generate_transpose_2d_kernel(info, args)
             elif info.pattern == "mixed_precision":
                 code = _generate_mixed_precision_kernel(info, args)
             elif info.pattern == "unary_op":
@@ -1072,7 +1117,7 @@ def launch(stream, grid: Tuple[int, int, int], kernel_func: _KernelWrapper, args
     args = tuple(converted_args)
 
     # Determine block size based on pattern
-    if info.pattern == "grid_2d":
+    if info.pattern == "grid_2d" or info.pattern == "transpose_2d":
         block_size = (16, 16, 1)
     elif info.pattern == "attention":
         # Need shared memory for attention
