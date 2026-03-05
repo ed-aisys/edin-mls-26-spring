@@ -5,18 +5,31 @@ Deploy two `Qwen/Qwen3.5-2B` instances on a SLURM GPU cluster with PyLet. One pl
 ## Architecture
 
 ```
-Login Node (gala2)            Compute Node (saxa, 2× GPU)
-┌──────────────┐              ┌──────────────────────────┐
-│  pylet head  │◄────────────►│     pylet worker         │
-│  (port 8000) │              │  GPU 0 → SGLang python-fan│
-│              │              │  GPU 1 → SGLang rust-fan  │
-│  debate.py   │              └──────────────────────────┘
-└──────────────┘
+ Login Node (hastings)                    Compute Node (saxa)
+┌───────────────────────┐            ┌──────────────────────────────┐
+│                       │            │         pylet worker         │
+│  1. pylet start       │            │                              │
+│     head :8000        │◄─register─►│  ┌────────────────────────┐  │
+│                       │            │  │ GPU 0                  │  │
+│  2. sbatch            │            │  │ SGLang (python-fan)    │  │
+│     start_worker.sh   │──allocate─►│  │ Qwen3-1.7B  :15600    │  │
+│                       │            │  └────────────────────────┘  │
+│  3. pylet submit      │            │                              │
+│     python-fan        │───deploy──►│  ┌────────────────────────┐  │
+│     rust-fan          │            │  │ GPU 1                  │  │
+│                       │            │  │ SGLang (rust-fan)      │  │
+│  4. debate.py         │            │  │ Qwen3-1.7B  :15601    │  │
+│     OpenAI client     │──/v1/chat─►│  └────────────────────────┘  │
+│                       │            │                              │
+└───────────────────────┘            └──────────────────────────────┘
+
+Flow:  1 start head → 2 SLURM allocates GPUs → 3 deploy models → 4 debate!
 ```
 
 - **Head** runs on the login node (no GPU needed, just the scheduler).
 - **Worker** runs on a SLURM-allocated compute node with 2 GPUs.
 - Each SGLang instance gets 1 GPU via PyLet's automatic allocation.
+- `debate.py` sends OpenAI-compatible HTTP requests from the login node to both SGLang endpoints.
 
 ## Prerequisites
 
