@@ -598,7 +598,7 @@ def gelu(x: torch.Tensor) -> torch.Tensor:
     """GELU activation using Triton."""
     original_shape = x.shape
     total = int(np.prod(x.shape))
-    block = 256
+    block = 1024  # Larger block for better GPU occupancy on RTX 5090
 
     x_flat = x.reshape(-1).contiguous().to(torch.float32)
     output = torch.empty_like(x_flat)
@@ -615,7 +615,7 @@ def silu(x: torch.Tensor) -> torch.Tensor:
     """SiLU activation using Triton."""
     original_shape = x.shape
     total = int(np.prod(x.shape))
-    block = 256
+    block = 1024  # Larger block for better GPU occupancy on RTX 5090
 
     x_flat = x.reshape(-1).contiguous().to(torch.float32)
     output = torch.empty_like(x_flat)
@@ -639,11 +639,11 @@ def get_activation(name: str):
 class Linear:
     """Linear layer with switchable backend (torch or Triton)."""
 
-    TILE_M = 64
-    TILE_N = 64
-    TILE_K = 32
+    TILE_M = 128
+    TILE_N = 128
+    TILE_K = 64
 
-    BACKEND = "torch"
+    BACKEND = "torch"  # cuBLAS is fastest for large matmuls on Blackwell
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
         self.in_features = in_features
@@ -847,7 +847,7 @@ class MLP:
     """MLP with SwiGLU gating using Triton."""
 
     FUSED = True
-    TILE_M, TILE_N, TILE_K = 64, 64, 32
+    TILE_M, TILE_N, TILE_K = 128, 128, 64
 
     def __init__(
         self,
@@ -974,7 +974,7 @@ class EncoderMLP:
     """Encoder MLP (no gating) using Triton."""
 
     FUSED = True
-    TILE_M, TILE_N, TILE_K = 64, 64, 32
+    TILE_M, TILE_N, TILE_K = 128, 128, 64
 
     def __init__(
         self,
