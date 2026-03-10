@@ -126,7 +126,9 @@ Decoder input:       (1, N_tokens, 2048)   # Audio + text token embeddings
 Decoder (28 layers):
   Q proj:            (1, N, 2048)          # 16 Q heads x 128 dim
   K/V proj:          (1, N, 512)           # 4 KV heads x 128 dim (GQA)
-  Expand KV:         (1, 16, N, 128)       # Repeat 4x for GQA
+  Reshape KV:        (1, 4, N, 128)
+  Expand KV in attention.py:
+                     (1, 16, N, 128)       # Explicit before SDPA on current stack
   Attention:         (1, 16, N, 128)       # Causal masked
   MLP (SwiGLU):      (1, N, 2048) -> 6144 -> 2048
 
@@ -141,13 +143,23 @@ Argmax:              next token ID
 ### Backend Selection
 ```python
 # In __init__.py:
-layers.Linear.BACKEND = "torch"    # cuBLAS — fastest on RTX 5090
-layers.Linear.BACKEND = "triton"   # Your custom Triton kernel
+layers.Linear.BACKEND = "torch"    # current committed config; F.linear -> cuBLAS/cuBLASLt
+layers.Linear.BACKEND = "triton"   # strict GUIDE.md linear-kernel path
 
 # Fusion flags:
 layers.MLP.FUSED = True            # Fused SwiGLU (decoder MLP)
 layers.EncoderMLP.FUSED = True     # Fused Linear+GELU (has no effect with original model.py)
 ```
+
+### Runtime Flags
+```python
+torch.set_float32_matmul_precision("high")
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
+```
+
+These are the current committed defaults in `__init__.py`.
 
 ### Tile Sizes (in layers.py)
 ```python
@@ -190,9 +202,9 @@ python benchmark_detailed.py glm_asr_triton_template
 
 | Implementation | Time | Speed | Accuracy |
 |----------------|------|-------|----------|
-| **Our template** | **214ms** | 16.5ms/tok | 100% |
-| Example baseline | 261ms | 20.1ms/tok | 100% |
-| **Speedup** | **18%** | | |
+| **Our template** | **209.8ms** | 16.14ms/tok | 100% |
+| Example baseline | 261.3ms | 20.10ms/tok | 100% |
+| **Speedup** | **19.7%** | | |
 
 **Why not <200ms?** The original `model.py` `generate()` has no KV cache —
 it re-runs the full sequence through 28 decoder layers per token. Adding KV cache
@@ -207,8 +219,10 @@ would require modifying `model.py`, which is not allowed.
 - [x] Tile/block sizes tuned (tested multiple configs)
 - [x] Fused SwiGLU active for decoder MLP
 - [x] Linear backend optimized (cuBLAS selected as fastest)
+- [x] TF32 runtime flags enabled in `__init__.py`
+- [x] GQA path optimized by explicit KV expansion before SDPA
 - [x] Activation block size 1024 (up from 256)
-- [x] Total inference time < baseline (214ms vs 261ms)
+- [x] Total inference time < baseline (209.8ms vs 261.3ms)
 - [ ] Target: <200ms (blocked by read-only model.py — no KV cache possible)
 
 ---

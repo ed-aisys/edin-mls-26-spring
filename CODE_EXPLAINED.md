@@ -185,9 +185,13 @@ Fuses THREE operations: two matmuls and the gating. Input `x` is loaded once.
 - Manages weight tensor device placement
 
 **`Linear` class:** Switchable between torch (cuBLAS) and Triton backends.
-- `BACKEND = "torch"`: Uses `x @ weight.t()` (dispatches to cuBLAS GEMM)
+- `BACKEND = "torch"`: Uses `torch.nn.functional.linear(...)`, which routes the
+  matmul path through PyTorch's cuBLAS/cuBLASLt dispatch
 - `BACKEND = "triton"`: Uses `linear_kernel_tf32`
-- On RTX 5090, cuBLAS is slightly faster (214ms vs 226ms)
+- `__init__.py` also enables `torch.set_float32_matmul_precision("high")`,
+  TF32 matmul, TF32 cuDNN, and `cudnn.benchmark`
+- The committed configuration keeps the cuBLAS path because it wins end-to-end
+  on this RTX 5090 stack
 - Caches transposed/padded weights (`_weight_t_padded`)
 
 **`MLP` class:** Implements SwiGLU gating for the text decoder:
@@ -220,10 +224,14 @@ The core of every transformer. Computes:
 Attention(Q, K, V) = softmax(Q @ K^T / sqrt(d_k)) @ V
 ```
 
-This is implemented as three separate kernels:
+The file contains three explicit kernels for this math:
 1. `attention_scores_kernel`: Computes `Q @ K^T * scale`
 2. `softmax_inplace_kernel`: Applies softmax to scores
 3. `attention_output_kernel`: Computes `softmax_scores @ V`
+
+In the current committed runtime path, `scaled_dot_product_attention()` first
+tries PyTorch SDPA because it can dispatch to fused attention kernels on the
+current CUDA stack. The explicit kernels remain as the fallback implementation.
 
 ### 3.2 Attention Scores Kernel
 
@@ -239,14 +247,19 @@ This is a matrix-vector product: one row of Q dotted with all rows of K.
 ### 3.3 Grouped Query Attention (GQA)
 
 The text decoder uses GQA: 16 query heads but only 4 KV heads.
-Each KV head is shared by 4 query heads. This reduces KV cache memory by 4x.
+Each KV head is shared by 4 query heads. This reduces KV-state size by 4x.
 
-In the original model.py, GQA is handled by expanding KV heads:
+In the current committed code, GQA expansion is handled inside
+`attention.py` just before the SDPA call:
 ```python
-# In model.py DecoderLayer:
-k = k.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
-v = v.repeat_interleave(self.num_heads // self.num_kv_heads, dim=1)
+if use_gqa:
+    k = _expand_kv_heads(k, num_heads)
+    v = _expand_kv_heads(v, num_heads)
+    use_gqa = False
 ```
+
+This is not just a shape fix. On this CUDA/PyTorch stack, explicit KV expansion
+benchmarked faster than relying on `scaled_dot_product_attention(..., enable_gqa=True)`.
 
 ### 3.4 Causal Masking
 
@@ -355,10 +368,11 @@ class TextDecoder:
 Each decoder layer:
 1. RMSNorm -> Q/K/V projections -> Reshape to heads
 2. Apply full RoPE to Q and K
-3. Expand KV heads (4 -> 16 for GQA)
-4. Causal attention (scaled_dot_product_attention)
-5. Output projection + residual
-6. RMSNorm -> SwiGLU MLP + residual
+3. Pass 4-head K/V tensors into `scaled_dot_product_attention`
+4. Inside `attention.py`, expand KV heads to 16 when GQA is active
+5. Causal attention (scaled_dot_product_attention)
+6. Output projection + residual
+7. RMSNorm -> SwiGLU MLP + residual
 
 The layer supports KV cache (via `past_key_value` parameter), but the `generate()`
 method in `GlmAsrModel` concatenates the full sequence each step instead of
@@ -456,6 +470,17 @@ def check_transcription(transcription, expected):
     # Pass if > 80% word overlap
 ```
 
+### Current Committed Benchmark
+
+On the RTX 5090 test box, the current committed runtime path measured:
+- `209.8ms (+/- 1.1ms)` average end-to-end
+- `16.14 ms/token`
+- `100.0%` transcription accuracy
+
+The detailed profiler showed the biggest improvement in the decode loop after
+the explicit GQA expansion change, with average decode-step time dropping to
+`7.26ms`.
+
 ---
 
 ## 9. How It All Fits Together
@@ -480,7 +505,7 @@ def check_transcription(transcription, expected):
      d. V = Linear(normalized)
      e. Reshape to (batch, heads, seq, dim)
      f. Apply partial RoPE to Q, K         [compute_freqs_kernel + torch ops]
-     g. Attention = softmax(QK^T/sqrt(d))V [attention kernels]
+     g. Attention = softmax(QK^T/sqrt(d))V [PyTorch SDPA fast path, fallback kernels available]
      h. output = Linear(attention)
      i. hidden = residual + output
      j. LayerNorm(hidden)
@@ -503,9 +528,9 @@ def check_transcription(transcription, expected):
      b. Q (16 heads) = Linear(normalized)
      c. K (4 heads) = Linear(normalized)   [GQA: 4 KV heads shared by 16 Q heads]
      d. V (4 heads) = Linear(normalized)
-     e. Expand KV: 4 -> 16 heads
-     f. Apply full RoPE to Q, K
-     g. Causal Attention (no looking ahead)
+     e. Apply full RoPE to Q, K
+     f. attention.py expands KV: 4 -> 16 heads before SDPA when needed
+     g. Causal Attention via SDPA (no looking ahead)
      h. RMSNorm(hidden)
      i. SwiGLU MLP:
         gate = SiLU(gate_proj(x))          [silu_kernel or swiglu_fused_kernel]

@@ -15,7 +15,7 @@ Completed all 10 Triton kernel implementations for the GLM-ASR speech-to-text mo
 The project is a University of Edinburgh MLS course assignment implementing GPU kernels
 for a multi-modal transformer (audio encoder + text decoder).
 
-**Final benchmark result: 214ms average, 100% transcription accuracy, 18% faster than baseline.**
+**Final benchmark result: 209.8ms average, 100% transcription accuracy, 19.7% faster than baseline.**
 
 ---
 
@@ -104,9 +104,21 @@ for a multi-modal transformer (audio encoder + text decoder).
 # __init__.py and layers.py
 Linear.BACKEND = "torch"  # cuBLAS — fastest for Blackwell RTX 5090
 ```
-Tested both `"triton"` and `"torch"` backends. cuBLAS is slightly faster (~214ms vs ~226ms).
+The committed code keeps the cuBLAS path enabled. `Linear._forward_torch()`
+now uses `torch.nn.functional.linear(...)`, which lets PyTorch pick the best
+cuBLAS/cuBLASLt implementation for the current shape and bias configuration.
 
-#### 4.2 Linear Tile Sizes
+#### 4.2 Runtime Flags
+```python
+torch.set_float32_matmul_precision("high")
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
+```
+These settings expose TF32 tensor-core paths for float32 math and let cuDNN
+cache the best kernel choice for the observed shapes.
+
+#### 4.3 Linear Tile Sizes
 ```python
 Linear.TILE_M = 128  # Larger tiles for better GPU occupancy
 Linear.TILE_N = 128
@@ -114,7 +126,7 @@ Linear.TILE_K = 64
 ```
 These are used when BACKEND="triton" and for the fused kernels.
 
-#### 4.3 Kernel Fusion (pre-implemented, enabled via config)
+#### 4.4 Kernel Fusion (pre-implemented, enabled via config)
 ```python
 MLP.FUSED = True         # Fused SwiGLU: SiLU(x @ gate) * (x @ up) in one kernel
 EncoderMLP.FUSED = True  # Fused Linear+GELU in one kernel
@@ -123,7 +135,18 @@ Note: `EncoderMLP.FUSED` is set but the original `model.py` doesn't use `Encoder
 (it uses separate `fc1`/`fc2` + `gelu()` calls). This setting is harmless but has no
 effect with the unmodified model.py.
 
-#### 4.4 Activation Block Sizes
+#### 4.5 SDPA GQA Fast Path
+```python
+if use_gqa:
+    k = _expand_kv_heads(k, num_heads)
+    v = _expand_kv_heads(v, num_heads)
+    use_gqa = False
+```
+`attention.py` now expands KV heads explicitly before
+`torch.nn.functional.scaled_dot_product_attention(...)` instead of relying on
+`enable_gqa=True`. On this CUDA/PyTorch stack, that reduced decode latency.
+
+#### 4.6 Activation Block Sizes
 - GELU/SiLU block size: 1024 (up from default 256) for better GPU occupancy
 
 ### Step 5: Environment Fixes (Session 2, 2026-03-10)
@@ -152,9 +175,9 @@ effect with the unmodified model.py.
 ### Our Implementation (`glm_asr_triton_template`)
 | Metric | Value |
 |--------|-------|
-| **Average time** | **214.3ms** (+/- 0.4ms) |
+| **Average time** | **209.8ms** (+/- 1.1ms) |
 | **Tokens** | 13 |
-| **Speed** | 16.49 ms/token |
+| **Speed** | 16.14 ms/token |
 | **Accuracy** | 100.0% |
 | **Transcription** | "Concord returned to its place amidst the tents." |
 
@@ -167,7 +190,10 @@ effect with the unmodified model.py.
 | **Accuracy** | 100.0% |
 
 ### Comparison
-- **18% faster** than the example baseline (214ms vs 261ms)
+- **19.7% faster** than the example baseline (209.8ms vs 261.3ms)
+- Best clean single run observed after the final optimization pass: **205.4ms**
+- Detailed profiler after the SDPA GQA change showed decode-step average
+  reduced to **7.26ms** from the earlier **9.91ms** path
 - Sub-200ms would require KV cache in model.py (which we cannot modify)
 - The original model.py `generate()` re-runs the full sequence through all 28 decoder
   layers for each new token — no KV cache, O(n^2) decode cost
@@ -244,5 +270,5 @@ pip uninstall nvidia-cublas    # Remove if version mismatches
 2. `5e8b191` — docs: add full documentation and optimize kernel tile sizes
 3. `01fc806` — docs: update claude.md with benchmark results and correct model config
 4. `714cdc9` — fix: revert model.py and conv.py to originals (do-not-modify files)
-5. `bdc7690` — perf: switch to cuBLAS backend and tune tile sizes (214ms, 18% faster)
-6. (this commit) — docs: update all documentation with final results and accurate info
+5. `bdc7690` — perf: switch to cuBLAS backend and tune tile sizes
+6. `a14e2d5` — Codex commit: optimize Triton template runtime path (209.8ms avg, TF32 runtime flags, explicit GQA expansion before SDPA)

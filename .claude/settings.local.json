@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mv /root/.claude /workspace/.claude-home && ln -s /workspace/.claude-home /root/.claude)"
+    ]
+  }
+}
