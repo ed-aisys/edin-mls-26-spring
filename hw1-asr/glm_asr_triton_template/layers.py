@@ -639,11 +639,11 @@ def get_activation(name: str):
 class Linear:
     """Linear layer with switchable backend (torch or Triton)."""
 
-    TILE_M = 128
-    TILE_N = 128
-    TILE_K = 64
+    TILE_M = 64
+    TILE_N = 64
+    TILE_K = 32
 
-    BACKEND = "torch"  # cuBLAS is fastest for large matmuls on Blackwell
+    BACKEND = "triton"  # Use Triton kernels (cuBLAS broken on this driver)
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
         self.in_features = in_features
@@ -847,7 +847,7 @@ class MLP:
     """MLP with SwiGLU gating using Triton."""
 
     FUSED = True
-    TILE_M, TILE_N, TILE_K = 128, 128, 64
+    TILE_M, TILE_N, TILE_K = 64, 64, 32
 
     def __init__(
         self,
@@ -974,7 +974,7 @@ class EncoderMLP:
     """Encoder MLP (no gating) using Triton."""
 
     FUSED = True
-    TILE_M, TILE_N, TILE_K = 128, 128, 64
+    TILE_M, TILE_N, TILE_K = 64, 64, 32
 
     def __init__(
         self,

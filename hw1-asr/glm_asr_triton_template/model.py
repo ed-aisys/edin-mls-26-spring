@@ -654,6 +654,10 @@ class GlmAsrModel:
         Returns:
             Audio embeddings (num_valid_frames, hidden_size) or (batch, seq, hidden) if no mask
         """
+        if input_features_mask is not None:
+            actual_len = int(input_features_mask.sum(dim=-1).max().item())
+            input_features = input_features[:, :, :actual_len].contiguous()
+
         audio_features = self.audio_encoder(input_features)
         projected = self.multi_modal_projector(audio_features)
 
