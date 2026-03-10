@@ -257,18 +257,44 @@ def linear_kernel_tf32(a_ptr, b_ptr, c_ptr, M, N, K,
 
 ### Phase 4: Attention Kernels
 
-#### 4.7 Attention Scores Kernel
+#### 4.7-4.9 Legacy Attention Kernels
 
-Computes `Q @ K^T * scale` for one query position. Loads a 1D query vector and
-a 2D key matrix, does broadcast-multiply and reduction.
+The original assignment has three separate attention kernels:
+- **Attention Scores**: `Q @ K^T * scale` per query position
+- **Softmax In-Place**: writes softmax back to input buffer
+- **Attention Output**: `attn_weights @ V` weighted sum
 
-#### 4.8 Softmax In-Place Kernel
+These still exist in the codebase but are **superseded by the fused Flash Attention
+kernel** (see Section 6.8).
 
-Same algorithm as softmax_kernel but writes back to the input buffer (saves allocation).
+#### 4.10 Fused Flash Attention Kernel (Advanced)
 
-#### 4.9 Attention Output Kernel
+The `flash_attention_kernel` replaces the 3-kernel approach with a single kernel
+using the **online softmax** algorithm:
 
-Computes `attn_weights @ V` — weighted sum of value vectors.
+```python
+# Inner loop: iterate over K/V blocks
+for start_n in range(0, kv_len, BLOCK_N):
+    k = tl.load(...)                          # K block [BLOCK_N, BLOCK_D]
+    s = tl.dot(q, tl.trans(k))                # Q @ K^T [BLOCK_M, BLOCK_N]
+    # Apply causal/attention masks if needed
+    m_ij = tl.max(s, axis=1)                  # Block max
+    m_new = tl.maximum(m_i, m_ij)             # Running max update
+    alpha = tl.exp(m_i - m_new)               # Rescale factor
+    p = tl.exp(s - m_new[:, None])            # Attention weights
+    l_i = alpha * l_i + tl.sum(p, axis=1)     # Running sum
+    acc = alpha[:, None] * acc                 # Rescale accumulator
+    v = tl.load(...)                           # V block
+    acc += tl.dot(p.to(v.dtype), v)           # Accumulate P @ V
+    m_i = m_new
+acc = acc / l_i[:, None]                      # Final normalization
+```
+
+Key advantages over the 3-kernel approach:
+- **No DRAM scores matrix** — scores stay in SRAM/registers
+- **Single kernel launch** — no synchronization between kernels
+- **O(BLOCK) SRAM** — memory-efficient for long sequences
+- Uses `tl.dot` for tensor core acceleration on both Q@K^T and P@V
 
 ### Phase 5: Positional Encoding
 
@@ -366,30 +392,38 @@ cast back to float32 for downstream ops.
 This must be set as a class-level default in `layers.py` (not just in `__init__.py`)
 because `__init__.py` is not executed when the benchmark imports modules directly.
 
-### 6.6 bfloat16 SDPA
+### 6.6 Fused Flash Attention (Triton)
 ```python
-# In attention.py:
-sdpa_dtype = torch.bfloat16 if q.is_cuda else torch.float32
-output = F.scaled_dot_product_attention(
-    q.to(sdpa_dtype), k.to(sdpa_dtype), v.to(sdpa_dtype), ...
+# In attention.py — primary CUDA path:
+flash_attention_kernel[grid](
+    q_flat, k_flat, v_flat, output, mask_flat, scale, ...,
+    IS_CAUSAL=is_causal, HAS_MASK=has_mask,
+    BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_D=BLOCK_D,
+    num_stages=1,
 )
 ```
 
-Casting Q/K/V to bfloat16 unlocks Flash Attention and cuDNN attention backends
-in PyTorch, which only support fp16/bf16 — not float32.
+Replaces SDPA and the old 3-kernel approach with a single Triton kernel using
+online softmax. No full attention scores matrix materialized in DRAM.
 
-### 6.7 Native GQA
+**Tile sizes** are chosen based on head_dim to fit the 101KB shared memory limit:
+- `head_dim=64` (encoder): `BLOCK_M=128, BLOCK_N=64`
+- `head_dim=128` (decoder): `BLOCK_M=64, BLOCK_N=32`
+
+`num_stages=1` prevents Triton from double-buffering K/V loads which would
+exceed shared memory.
+
+### 6.7 GQA with Flash Attention
 ```python
 # In attention.py:
-output = F.scaled_dot_product_attention(
-    q.to(sdpa_dtype), k.to(sdpa_dtype), v.to(sdpa_dtype),
-    ..., enable_gqa=use_gqa,
-)
+if use_gqa:
+    k = _expand_kv_heads(k, num_heads)
+    v = _expand_kv_heads(v, num_heads)
 ```
 
-Instead of explicitly expanding KV heads before SDPA, pass `enable_gqa=True`
-and let the SDPA backend handle GQA natively. This avoids the memory copies
-from `_expand_kv_heads()` and is faster with bf16 inputs.
+GQA is handled by explicitly expanding KV heads before the Flash Attention
+kernel call. The expansion is a zero-copy broadcast+reshape, so the overhead
+is minimal.
 
 ### 6.8 Activation Block Size
 GELU and SiLU use BLOCK_SIZE=1024 by default. On GPUs with many SMs (like RTX 5090
@@ -417,17 +451,16 @@ with 170 SMs), larger blocks reduce launch overhead.
 
 | Implementation | Time | Speed | vs Baseline |
 |----------------|------|-------|-------------|
-| Our optimized template | **113.0ms** | 8.69ms/tok | **56.7% faster** |
+| Our optimized template | **109.0ms** | 8.39ms/tok | **58.3% faster** |
 | Example baseline | 261.3ms | 20.10ms/tok | -- |
 | CPU fallback (no GPU) | ~14,000ms | ~1,000ms/tok | -- |
 
 Key optimizations ranked by impact:
 1. **cuBLAS-backed `F.linear`** + TF32 flags — cuBLAS outperforms Triton linear kernel
 2. **bfloat16 weights** — halves memory traffic for decode matmuls
-3. **bfloat16 SDPA** — enables Flash Attention backends
-4. **Native GQA** — eliminates KV head expansion memory copies
-5. **Fused SwiGLU + EncoderMLP** — reduces kernel launch overhead and DRAM round-trips
-6. **KV-cached generation** — natively in model.py, O(n) decode instead of O(n^2)
+3. **Fused Flash Attention** — Triton kernel with online softmax, replaces SDPA and 3-kernel approach
+4. **Fused SwiGLU + EncoderMLP** — reduces kernel launch overhead and DRAM round-trips
+5. **KV-cached generation** — natively in model.py, O(n) decode instead of O(n^2)
 
 ---
 

@@ -232,66 +232,114 @@ The core of every transformer. Computes:
 Attention(Q, K, V) = softmax(Q @ K^T / sqrt(d_k)) @ V
 ```
 
-The file contains three explicit kernels for this math:
-1. `attention_scores_kernel`: Computes `Q @ K^T * scale`
-2. `softmax_inplace_kernel`: Applies softmax to scores
-3. `attention_output_kernel`: Computes `softmax_scores @ V`
+### 3.2 Primary Path: Fused Flash Attention Kernel (Triton)
 
-### 3.2 Primary Path: bf16 SDPA with Native GQA
-
-The committed runtime path uses PyTorch's `F.scaled_dot_product_attention` as
-the primary attention implementation:
+The committed runtime path uses a fused Triton Flash Attention kernel with
+**online softmax** as the primary attention implementation. This replaces both
+SDPA and the old 3-kernel approach.
 
 ```python
-sdpa_dtype = torch.bfloat16 if q.is_cuda else torch.float32
-output = F.scaled_dot_product_attention(
-    q.to(sdpa_dtype), k.to(sdpa_dtype), v.to(sdpa_dtype),
-    attn_mask=attention_mask, dropout_p=0.0, is_causal=is_causal,
-    scale=scale, enable_gqa=use_gqa,
-)
-return output.to(q.dtype)
+# attention.py — scaled_dot_product_attention()
+if q.is_cuda:
+    # Expand GQA heads before kernel call
+    if use_gqa:
+        k = _expand_kv_heads(k, num_heads)
+        v = _expand_kv_heads(v, num_heads)
+    # Single fused kernel launch
+    flash_attention_kernel[grid](
+        q_flat, k_flat, v_flat, output, mask_flat, scale, ...,
+        IS_CAUSAL=is_causal, HAS_MASK=has_mask,
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_D=BLOCK_D,
+        num_stages=1,
+    )
 ```
 
-Two key optimizations here:
+**How it works (online softmax algorithm):**
 
-1. **bfloat16 casting:** Q/K/V are cast to bfloat16 before SDPA. This unlocks
-   Flash Attention and cuDNN attention backends in PyTorch, which only support
-   fp16/bf16 — not float32. The output is cast back to the original dtype.
+The kernel processes Q in tiles of `BLOCK_M` rows. For each Q tile, it iterates
+over K/V in blocks of `BLOCK_N`, maintaining a running softmax:
 
-2. **Native GQA:** Instead of explicitly expanding KV heads from 4 to 16 with
-   `_expand_kv_heads()` (which allocates memory and copies data), the code
-   passes `enable_gqa=use_gqa` to let the SDPA backend handle GQA natively.
-   With bf16 inputs, this is faster because it avoids the memory copies.
-
-The Triton kernels and torch fallback remain as backup paths if SDPA fails.
-
-### 3.3 Attention Scores Kernel
-
-For each query position `q` and each batch-head `bh`:
 ```
-Load Q[bh, q, :] as a 1D vector (head_dim elements)
-Load K[bh, :, :] as a 2D matrix (seq_k x head_dim)
-scores = sum(K * Q[broadcast], dim=-1) * scale
+m_i = -inf          # running max (per query row)
+l_i = 0             # running sum of exp (per query row)
+acc = 0             # output accumulator [BLOCK_M, BLOCK_D]
+
+for each K/V block:
+    S = Q_tile @ K_block^T          # tl.dot — tensor cores
+    # Apply causal mask (if IS_CAUSAL)
+    # Apply attention mask bias (if HAS_MASK)
+    m_new = max(m_i, max(S))        # updated running max
+    alpha = exp(m_i - m_new)        # rescale factor for old state
+    p = exp(S - m_new)              # new attention weights
+    l_i = alpha * l_i + sum(p)      # updated running sum
+    acc = alpha * acc + p @ V_block # rescale old + accumulate new (tl.dot)
+    m_i = m_new
+
+output = acc / l_i                  # final normalization
 ```
 
-This is a matrix-vector product: one row of Q dotted with all rows of K.
+**Why this is better than the 3-kernel approach:**
+1. **No DRAM scores matrix** — the full `(batch*heads, seq_q, seq_k)` scores
+   matrix is never materialized. Everything stays in SRAM/registers.
+2. **Single kernel launch** — no synchronization overhead between kernels.
+3. **O(BLOCK) SRAM** — memory-efficient for long sequences.
+4. **Tensor cores** — `tl.dot` for both Q@K^T and P@V.
+
+**Tile sizes** (chosen to fit 101KB shared memory):
+- Encoder (head_dim=64): `BLOCK_M=128, BLOCK_N=64` — larger tiles for more parallelism
+- Decoder (head_dim=128): `BLOCK_M=64, BLOCK_N=32` — smaller tiles due to larger SRAM per element
+- `num_stages=1` — prevents Triton from double-buffering K/V loads
+
+**Features:**
+- `IS_CAUSAL` (constexpr): enables causal masking for decoder (`offs_m >= cur_offs_n`)
+- `HAS_MASK` (constexpr): enables additive attention mask bias (zero overhead when False)
+- Supports arbitrary sequence lengths (no `MAX_ATTENTION_DIM` limit)
+
+### 3.3 Legacy Attention Kernels
+
+The file also contains three legacy kernels from the original assignment:
+
+1. **`attention_scores_kernel`**: Computes `Q @ K^T * scale` for one query position
+   using broadcast-multiply and reduction.
+2. **`softmax_inplace_kernel`**: In-place numerically stable softmax.
+3. **`attention_output_kernel`**: Computes `attn_weights @ V` weighted sum.
+
+These are superseded by `flash_attention_kernel` but remain in the codebase.
 
 ### 3.4 Grouped Query Attention (GQA)
 
 The text decoder uses GQA: 16 query heads but only 4 KV heads.
 Each KV head is shared by 4 query heads. This reduces KV-state size by 4x.
 
-In the primary SDPA path, GQA is handled natively by passing `enable_gqa=True`.
-In the fallback paths (Triton kernels and torch einsum), KV heads are expanded
-explicitly using `_expand_kv_heads()`.
+GQA is handled by explicitly expanding KV heads using `_expand_kv_heads()` before
+the Flash Attention kernel call. The expansion is a zero-copy broadcast+reshape.
 
 ### 3.5 Causal Masking
 
-For autoregressive generation, position `i` can only attend to positions `<= i`:
+In the Flash Attention kernel, causal masking is applied per-block:
 ```python
-scores = tl.where(offs_k > current_pos, -1e9, scores)
+if IS_CAUSAL:
+    s = tl.where(offs_m[:, None] >= cur_offs_n[None, :], s, -float("inf"))
 ```
-Setting future positions to `-1e9` makes them zero after softmax.
+The kernel also short-circuits the K/V iteration range for causal mode:
+```python
+kv_len = tl.minimum(seq_k, (pid_m + 1) * BLOCK_M)  # skip future blocks entirely
+```
+
+### 3.6 Numerical Parity Tests
+
+The file includes 8 parity tests (`__main__` block) that validate the Flash
+Attention kernel against a pure PyTorch reference:
+1. Basic attention (head_dim=64)
+2. Causal attention (head_dim=64)
+3. Masked attention (head_dim=64)
+4. GQA (4Q/2KV heads, head_dim=64)
+5. Basic attention (head_dim=128)
+6. Causal attention (head_dim=128)
+7. Causal + mask combined (head_dim=128)
+8. Decode step (seq_q=1, seq_k=64, head_dim=128)
+
+All tests pass with max diff < 0.01 (fp32 accumulation tolerance).
 
 ---
 
@@ -403,8 +451,8 @@ Each decoder layer:
 1. RMSNorm -> Q/K/V projections -> Reshape to heads
 2. Apply full RoPE to Q and K
 3. Pass 4-head K/V tensors into `scaled_dot_product_attention`
-4. Inside `attention.py`, SDPA handles GQA natively via `enable_gqa=True`
-5. Causal attention (scaled_dot_product_attention)
+4. Inside `attention.py`, GQA handled via `_expand_kv_heads` + Flash Attention kernel
+5. Causal attention (fused Flash Attention with online softmax)
 6. Output projection + residual
 7. RMSNorm -> SwiGLU MLP + residual
 
@@ -525,8 +573,8 @@ def check_transcription(transcription, expected):
 ### Current Committed Benchmark
 
 On the RTX 5090 test box, the current committed runtime path measured:
-- `113.0ms` average end-to-end (with KV-cached `generate_v8b`)
-- `8.69 ms/token`
+- `109.0ms` average end-to-end (with KV-cached `generate_v8b`)
+- `8.39 ms/token`
 - `100.0%` transcription accuracy
 
 ---
@@ -553,7 +601,7 @@ On the RTX 5090 test box, the current committed runtime path measured:
      d. V = Linear(normalized)
      e. Reshape to (batch, heads, seq, dim)
      f. Apply partial RoPE to Q, K         [compute_freqs_kernel + torch ops]
-     g. Attention = softmax(QK^T/sqrt(d))V [SDPA bf16 with native GQA]
+     g. Attention = softmax(QK^T/sqrt(d))V [Flash Attention kernel]
      h. output = Linear(attention)
      i. hidden = residual + output
      j. LayerNorm(hidden)
@@ -577,7 +625,7 @@ On the RTX 5090 test box, the current committed runtime path measured:
      c. K (4 heads) = Linear(normalized)   [GQA: 4 KV heads shared by 16 Q heads]
      d. V (4 heads) = Linear(normalized)
      e. Apply full RoPE to Q, K
-     f. Causal Attention via SDPA (bf16, native GQA via enable_gqa=True)
+     f. Causal Attention via Flash Attention kernel (GQA via _expand_kv_heads)
      g. KV states cached in kv_buffers     [forward_with_kv_buffers]
      h. RMSNorm(hidden)
      i. SwiGLU MLP:
@@ -614,7 +662,7 @@ Each decode step processes only 1 token through the decoder.
 | gelu_kernel | 33 | 0 | 0 | 0 | 33 |
 | silu_kernel | 0 | 28 | 28 | 364 | 392 |
 | linear (cuBLAS bf16) | ~160 | ~168 | ~168 | ~2184 | ~2512 |
-| SDPA (bf16, native GQA) | 32 | 28 | 28 | 364 | 424 |
+| flash_attention_kernel | 32 | 28 | 28 | 364 | 424 |
 | compute_freqs | 1 | 1 | 0 | 0 | 2 |
 | softmax (standalone) | 0 | 1 | 1 | 13 | 14 |
 

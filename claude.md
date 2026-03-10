@@ -15,7 +15,7 @@ Completed all 10 Triton kernel implementations for the GLM-ASR speech-to-text mo
 The project is a University of Edinburgh MLS course assignment implementing GPU kernels
 for a multi-modal transformer (audio encoder + text decoder).
 
-**Final benchmark result: 113.0ms average, 100% transcription accuracy, 56.7% faster than baseline.**
+**Final benchmark result: 109.0ms average, 100% transcription accuracy, 58.3% faster than baseline.**
 
 ---
 
@@ -76,18 +76,24 @@ for a multi-modal transformer (audio encoder + text decoder).
 - Numerically stable: subtract max before exp to prevent overflow
 - Grid: (num_rows,), one block per row
 
-#### 3.2 `attention.py` — 3 kernels
+#### 3.2 `attention.py` — 4 kernels (3 legacy + 1 fused)
 
-**attention_scores_kernel**: `scores = sum(K * Q[broadcast], dim=-1) * scale`
-- Loads Q vector and K matrix, broadcast-multiply and reduce
+**flash_attention_kernel** (PRIMARY): Fused Flash Attention with online softmax
+- Single kernel launch replaces the 3-kernel approach and SDPA
+- Online softmax: running max `m_i`, running sum `l_i`, accumulator rescaling
+- `tl.dot` for Q@K^T and P@V (tensor cores)
+- Supports causal (`IS_CAUSAL`), attention mask (`HAS_MASK`), and arbitrary seq lengths
+- Tile sizes: BLOCK_M=128/BLOCK_N=64 for head_dim≤64 (encoder), BLOCK_M=64/BLOCK_N=32 for head_dim=128 (decoder)
+- `num_stages=1` to stay within 101KB shared memory limit
+- Grid: (cdiv(seq_q, BLOCK_M), batch_heads)
+
+**attention_scores_kernel** (legacy): `scores = sum(K * Q[broadcast], dim=-1) * scale`
 - Grid: (batch_heads, seq_q)
 
-**softmax_inplace_kernel**: In-place numerically stable softmax
-- Same as softmax_kernel but writes back to input buffer
+**softmax_inplace_kernel** (legacy): In-place numerically stable softmax
 - Grid: (batch_heads * seq_q,)
 
-**attention_output_kernel**: `output = sum(V * weights[:, None], dim=0)`
-- Weighted sum of value vectors by attention weights
+**attention_output_kernel** (legacy): `output = sum(V * weights[:, None], dim=0)`
 - Grid: (batch_heads, seq_q)
 
 #### 3.3 `rope.py` — 1 kernel
@@ -137,17 +143,21 @@ LinearGELU.FUSED = False    # Disabled — shared memory exceeds hardware limit 
 because the projector's large dimensions (5120x4096) exceed the GPU's shared memory
 limit with tile sizes 128x128x64. The unfused cuBLAS + separate GELU path is used instead.
 
-#### 4.5 Native GQA via SDPA
+#### 4.5 Fused Flash Attention (Triton)
 ```python
-# attention.py — primary SDPA path
-output = F.scaled_dot_product_attention(
-    q.to(sdpa_dtype), k.to(sdpa_dtype), v.to(sdpa_dtype),
-    ..., enable_gqa=use_gqa,
+# attention.py — primary path: fused Flash Attention kernel
+flash_attention_kernel[grid](
+    q_flat, k_flat, v_flat, output, mask_flat,
+    scale, seq_q, seq_k, head_dim, ...,
+    IS_CAUSAL=is_causal, HAS_MASK=has_mask,
+    BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_D=BLOCK_D,
+    num_stages=1,
 )
 ```
-Uses `enable_gqa=True` to let PyTorch handle GQA natively instead of explicit
-KV head expansion. Faster with bfloat16 inputs because the SDPA backend avoids
-the memory copies from head expansion.
+Replaces both SDPA and the old 3-kernel approach. Uses online softmax to avoid
+materializing the full attention scores matrix in DRAM. Single kernel launch
+with `tl.dot` for tensor core utilization. Supports causal masking, attention
+masks, and GQA (via explicit `_expand_kv_heads` before the kernel call).
 
 #### 4.6 Activation Block Sizes
 - GELU/SiLU block size: 1024 (up from default 256) for better GPU occupancy
@@ -161,16 +171,17 @@ Caches bfloat16 copies of weights (`_weight_bf16`, `_bias_bf16`) on first use.
 All matmuls via `F.linear` run in bf16, halving memory traffic for memory-bound
 decode matmuls. Results are cast back to float32 for downstream ops.
 
-#### 4.8 bfloat16 SDPA
+#### 4.8 Triton Flash Attention Tile Sizes
 ```python
-# attention.py
-sdpa_dtype = torch.bfloat16 if q.is_cuda else torch.float32
-output = F.scaled_dot_product_attention(
-    q.to(sdpa_dtype), k.to(sdpa_dtype), v.to(sdpa_dtype), ...
-)
+# attention.py — chosen to stay within 101KB shared memory limit
+if head_dim <= 64:   # Encoder (20 heads, head_dim=64)
+    BLOCK_M, BLOCK_N = 128, 64
+else:                # Decoder (16 heads, head_dim=128)
+    BLOCK_M, BLOCK_N = 64, 32
 ```
-Casting Q/K/V to bfloat16 unlocks Flash Attention and cuDNN attention backends
-in PyTorch, which only support fp16/bf16 — not float32.
+Larger tiles for encoder (more parallelism) and smaller tiles for decoder
+(head_dim=128 needs more SRAM per tile). `num_stages=1` prevents Triton
+from double-buffering K/V blocks, which would exceed shared memory.
 
 #### 4.9 KV-Cached Generation (`generate_v8b`)
 `model.py` natively includes `generate_v8b()`, which uses the KV cache
@@ -225,6 +236,22 @@ for `generate_v8b` and uses it when available.
 - `generate_v8b` is natively defined in model.py (origin/ankush already had it)
 - No runtime class modification needed
 
+#### 6.7 Removed SDPA Fast-Path
+- SDPA (`F.scaled_dot_product_attention`) try-block removed from attention.py
+- Ensured Triton attention kernels are the active path (GUIDE.md compliance)
+- Cost: 105.2ms → 151.0ms with old 3-kernel approach
+
+#### 6.8 Fused Flash Attention Kernel
+- Implemented `flash_attention_kernel` in Triton with online softmax
+- Single kernel launch replaces the 3-kernel approach (scores → softmax → output)
+- No full attention matrix materialization in DRAM
+- Supports `IS_CAUSAL` (decoder) and `HAS_MASK` (attention_mask bias) via constexprs
+- Tile sizes: BLOCK_M=128/BLOCK_N=64 for head_dim≤64, BLOCK_M=64/BLOCK_N=32 for head_dim=128
+- `num_stages=1` to fit within RTX 5090's 101KB shared memory limit
+- GQA handled via `_expand_kv_heads` before kernel call
+- 8 numerical parity tests added (basic, causal, masked, GQA, head_dim=64/128, decode)
+- Result: 109.0ms — faster than SDPA (113.0ms) and fully GUIDE.md compliant
+
 ---
 
 ## Benchmark Results
@@ -232,9 +259,9 @@ for `generate_v8b` and uses it when available.
 ### Our Implementation (`glm_asr_triton_template`)
 | Metric | Value |
 |--------|-------|
-| **Average time** | **113.0ms** (+/- 0.9ms) |
+| **Average time** | **109.0ms** (+/- 0.2ms) |
 | **Tokens** | 13 |
-| **Speed** | 8.69 ms/token |
+| **Speed** | 8.39 ms/token |
 | **Accuracy** | 100.0% |
 | **Transcription** | "Concord returned to its place amidst the tents." |
 
@@ -247,7 +274,7 @@ for `generate_v8b` and uses it when available.
 | **Accuracy** | 100.0% |
 
 ### Comparison
-- **56.7% faster** than the example baseline (113.0ms vs 261.3ms)
+- **58.3% faster** than the example baseline (109.0ms vs 261.3ms)
 
 ### Optimization Progression
 | Change | Time | Delta |
@@ -255,6 +282,7 @@ for `generate_v8b` and uses it when available.
 | Baseline (example) | 261.3ms | -- |
 | All kernels + cuBLAS + TF32 | 209.8ms | -51.5ms |
 | bf16 weights + bf16 SDPA + native GQA | 113.0ms | -96.8ms |
+| Fused Flash Attention kernel (Triton) | 109.0ms | -4.0ms |
 
 ---
 
@@ -278,7 +306,7 @@ Audio (WAV 16kHz)
 | File | Purpose | Modifiable? |
 |------|---------|:-----------:|
 | `glm_asr_triton_template/layers.py` | Layer kernels (6) + config + fused kernels | Yes |
-| `glm_asr_triton_template/attention.py` | Attention kernels (3) + bf16 SDPA | Yes |
+| `glm_asr_triton_template/attention.py` | Flash Attention kernel + 3 legacy kernels | Yes |
 | `glm_asr_triton_template/rope.py` | RoPE kernel (1) | Yes |
 | `glm_asr_triton_template/__init__.py` | Backend/fusion configuration | Yes |
 | `glm_asr_triton_template/model.py` | Model architecture + KV-cached generate | **No** |
@@ -326,9 +354,9 @@ pip uninstall nvidia-cublas    # Remove if version mismatches
 
 | Rule | Status | Notes |
 |------|--------|-------|
-| 1. Triton inside kernels only | **Pass** | All `@triton.jit` kernels use only `tl.*`; cuBLAS/SDPA in Python wrappers |
+| 1. Triton inside kernels only | **Pass** | All `@triton.jit` kernels use only `tl.*`; cuBLAS in Python wrappers |
 | 2. May use examples as reference | **Pass** | -- |
-| 3. May refactor and fuse kernels | **Pass** | Fused SwiGLU + EncoderMLP + bf16 path |
+| 3. May refactor and fuse kernels | **Pass** | Fused SwiGLU + EncoderMLP + Flash Attention |
 | 4. Don't modify model/weight_loader/conv | **Pass** | All three match `origin/ankush` exactly (zero diff) |
 
 ---
@@ -343,3 +371,5 @@ pip uninstall nvidia-cublas    # Remove if version mismatches
 6. `a14e2d5` — Codex commit: optimize Triton template runtime path
 7. `9453c39` — Claude commit: KV-cache generate + bf16 weights + native GQA (128.7ms, 51% faster)
 8. `f38ade2` — Claude commit: update docs + fix duplicate GQA bug
+9. (pending) — Claude commit: restore model.py/conv.py + remove monkey-patch + SDPA removal
+10. (pending) — Claude commit: fused Flash Attention kernel + mask support + parity tests

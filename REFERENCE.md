@@ -37,7 +37,7 @@ Quick reference for kernel signatures, model architecture, and performance tunin
 | File | Modifiable? | What's In It |
 |------|:-----------:|--------------|
 | `layers.py` | **Yes** | All 6 layer kernels + config knobs + fused kernels + layer classes |
-| `attention.py` | **Yes** | 3 attention kernels + bf16 SDPA + native GQA |
+| `attention.py` | **Yes** | Fused Flash Attention kernel + 3 legacy attention kernels |
 | `rope.py` | **Yes** | 1 RoPE kernel |
 | `__init__.py` | **Yes** | Backend/fusion configuration |
 | `model.py` | **No** | Model architecture, KV-cached generation (`generate_v8b`) |
@@ -75,15 +75,23 @@ softmax_kernel(x_ptr, y_ptr, stride_x, stride_y, n_cols, BLOCK_SIZE)
 ### attention.py
 
 ```python
-# Attention Scores — Grid: (batch_heads, seq_q)
+# Flash Attention (PRIMARY) — Grid: (cdiv(seq_q, BLOCK_M), batch_heads)
+# Fused online softmax: single kernel, no DRAM scores matrix
+flash_attention_kernel(q_ptr, k_ptr, v_ptr, o_ptr, mask_ptr, scale,
+                       seq_q, seq_k, head_dim,
+                       stride_qb..qd, stride_kb..kd, stride_vb..vd,
+                       stride_ob..od, stride_mb..mk,
+                       IS_CAUSAL, HAS_MASK, BLOCK_M, BLOCK_N, BLOCK_D)
+
+# Legacy: Attention Scores — Grid: (batch_heads, seq_q)
 attention_scores_kernel(q_ptr, k_ptr, scores_ptr, scale, seq_k, head_dim,
                         stride_q0..q2, stride_k0..k2, stride_s0..s2,
                         BLOCK_K, BLOCK_D)
 
-# Softmax In-place — Grid: (batch_heads * seq_q,)
+# Legacy: Softmax In-place — Grid: (batch_heads * seq_q,)
 softmax_inplace_kernel(scores_ptr, stride_s, seq_k, BLOCK_SIZE)
 
-# Attention Output — Grid: (batch_heads, seq_q)
+# Legacy: Attention Output — Grid: (batch_heads, seq_q)
 attention_output_kernel(attn_ptr, v_ptr, output_ptr, seq_k, head_dim,
                         stride_w0..w2, stride_v0..v2, stride_o0..o2,
                         BLOCK_K, BLOCK_D)
@@ -129,7 +137,7 @@ Decoder (28 layers):
   K/V proj:          (1, N, 512)           # 4 KV heads x 128 dim (GQA)
   Reshape Q:         (1, 16, N, 128)
   Reshape KV:        (1, 4, N, 128)
-  Attention (bf16):  (1, 16, N, 128)       # Native GQA via enable_gqa=True
+  Attention:         (1, 16, N, 128)       # Flash Attention kernel (GQA via _expand_kv_heads)
   MLP (SwiGLU):      (1, N, 2048) -> 6144 -> 2048
 
 LM Head:             (1, N, 59264)         # Vocab logits
@@ -174,15 +182,19 @@ torch.backends.cudnn.benchmark = True
 
 These are the current committed defaults in `__init__.py`.
 
-### SDPA Configuration
+### Flash Attention Configuration
 ```python
 # In attention.py:
-# Q/K/V cast to bfloat16 before SDPA (enables Flash Attention / cuDNN backends)
-# Native GQA via enable_gqa=True (no explicit KV head expansion)
-sdpa_dtype = torch.bfloat16 if q.is_cuda else torch.float32
-output = F.scaled_dot_product_attention(
-    q.to(sdpa_dtype), k.to(sdpa_dtype), v.to(sdpa_dtype),
-    ..., enable_gqa=use_gqa,
+# Primary CUDA path: fused Triton Flash Attention kernel with online softmax
+# GQA handled via _expand_kv_heads before kernel call
+# Tile sizes chosen per head_dim to stay within 101KB shared memory
+if head_dim <= 64:   BLOCK_M, BLOCK_N = 128, 64  # Encoder
+else:                BLOCK_M, BLOCK_N = 64, 32    # Decoder
+flash_attention_kernel[grid](
+    q_flat, k_flat, v_flat, output, mask_flat, scale, ...,
+    IS_CAUSAL=is_causal, HAS_MASK=has_mask,
+    BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_D=head_dim_padded,
+    num_stages=1,
 )
 ```
 
@@ -249,9 +261,9 @@ python benchmark_detailed.py glm_asr_triton_template
 
 | Implementation | Time | Speed | Accuracy |
 |----------------|------|-------|----------|
-| **Our template** | **113.0ms** | 8.69ms/tok | 100% |
+| **Our template** | **109.0ms** | 8.39ms/tok | 100% |
 | Example baseline | 261.3ms | 20.10ms/tok | 100% |
-| **Speedup** | **56.7%** | | |
+| **Speedup** | **58.3%** | | |
 
 ---
 
@@ -265,12 +277,14 @@ python benchmark_detailed.py glm_asr_triton_template
 - [x] LinearGELU fusion disabled (shared memory limit)
 - [x] Linear backend optimized (cuBLAS selected as fastest)
 - [x] TF32 runtime flags enabled in `__init__.py`
-- [x] GQA path optimized — native `enable_gqa=True` with bf16 inputs
+- [x] GQA path optimized — `_expand_kv_heads` before Flash Attention kernel
 - [x] Activation block size 1024 (up from 256)
 - [x] bfloat16 weights — halves memory traffic for decode matmuls
-- [x] bfloat16 SDPA — enables Flash Attention / cuDNN backends
+- [x] Fused Flash Attention — Triton kernel with online softmax, replaces SDPA and 3-kernel approach
+- [x] Flash Attention supports causal, attention_mask, and arbitrary seq lengths
+- [x] 8 numerical parity tests for Flash Attention (basic, causal, masked, GQA, hd64/128, decode)
 - [x] KV-cache generation — O(n) decode via native `generate_v8b` in model.py
-- [x] Total inference time < 200ms target (113.0ms achieved)
+- [x] Total inference time < 200ms target (109.0ms achieved)
 - [x] model.py, conv.py, weight_loader.py all match origin/ankush (zero diff)
 
 ---

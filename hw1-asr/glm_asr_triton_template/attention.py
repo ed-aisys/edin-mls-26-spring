@@ -196,6 +196,137 @@ def causal_mask_kernel(
 
 
 # ============================================================================
+# Fused Flash Attention Kernel (online softmax, single kernel launch)
+# ============================================================================
+
+@triton.jit
+def flash_attention_kernel(
+    q_ptr, k_ptr, v_ptr, o_ptr,
+    mask_ptr,
+    scale,
+    seq_q, seq_k, head_dim: tl.constexpr,
+    stride_qb, stride_qq, stride_qd,
+    stride_kb, stride_kk, stride_kd,
+    stride_vb, stride_vk, stride_vd,
+    stride_ob, stride_oq, stride_od,
+    stride_mb, stride_mq, stride_mk,
+    IS_CAUSAL: tl.constexpr,
+    HAS_MASK: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    """
+    Fused Flash Attention with online softmax.
+    Grid: (cdiv(seq_q, BLOCK_M), batch_heads)
+
+    Processes Q in tiles of BLOCK_M rows, iterating over K/V in BLOCK_N chunks.
+    Uses online softmax to avoid materializing the full attention matrix.
+    """
+    pid_m = tl.program_id(0)
+    pid_bh = tl.program_id(1)
+
+    # Offsets for this Q tile
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)  # [BLOCK_M]
+    offs_n = tl.arange(0, BLOCK_N)                      # [BLOCK_N]
+    offs_d = tl.arange(0, BLOCK_D)                      # [BLOCK_D]
+
+    # Base pointers for this batch/head
+    q_base = q_ptr + pid_bh * stride_qb
+    k_base = k_ptr + pid_bh * stride_kb
+    v_base = v_ptr + pid_bh * stride_vb
+    if HAS_MASK:
+        m_base = mask_ptr + pid_bh * stride_mb
+
+    # Load Q tile: [BLOCK_M, BLOCK_D]
+    q_mask = (offs_m[:, None] < seq_q) & (offs_d[None, :] < head_dim)
+    q = tl.load(
+        q_base + offs_m[:, None] * stride_qq + offs_d[None, :] * stride_qd,
+        mask=q_mask,
+        other=0.0,
+    )
+    q = (q * scale).to(tl.float32)
+
+    # Running softmax state
+    m_i = tl.full([BLOCK_M], value=-float("inf"), dtype=tl.float32)  # running max
+    l_i = tl.full([BLOCK_M], value=0.0, dtype=tl.float32)            # running sum
+    acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)              # accumulator
+
+    # Determine K/V iteration range
+    if IS_CAUSAL:
+        # For causal, only need to go up to the last row in this Q block
+        kv_len = tl.minimum(seq_k, (pid_m + 1) * BLOCK_M)
+    else:
+        kv_len = seq_k
+
+    # Iterate over K/V blocks
+    for start_n in range(0, kv_len, BLOCK_N):
+        cur_offs_n = start_n + offs_n  # [BLOCK_N]
+
+        # Load K block: [BLOCK_N, BLOCK_D]
+        k_mask = (cur_offs_n[:, None] < seq_k) & (offs_d[None, :] < head_dim)
+        k = tl.load(
+            k_base + cur_offs_n[:, None] * stride_kk + offs_d[None, :] * stride_kd,
+            mask=k_mask,
+            other=0.0,
+        )
+
+        # S = Q @ K^T: [BLOCK_M, BLOCK_N]
+        s = tl.dot(q, tl.trans(k))
+
+        # Mask out-of-bounds keys
+        s = tl.where(cur_offs_n[None, :] < seq_k, s, -float("inf"))
+
+        # Apply causal mask
+        if IS_CAUSAL:
+            s = tl.where(offs_m[:, None] >= cur_offs_n[None, :], s, -float("inf"))
+
+        # Apply attention mask bias
+        if HAS_MASK:
+            am = tl.load(
+                m_base + offs_m[:, None] * stride_mq + cur_offs_n[None, :] * stride_mk,
+                mask=(offs_m[:, None] < seq_q) & (cur_offs_n[None, :] < seq_k),
+                other=0.0,
+            )
+            s = s + am
+
+        # Online softmax update
+        m_ij = tl.max(s, axis=1)                        # [BLOCK_M]
+        m_new = tl.maximum(m_i, m_ij)                   # [BLOCK_M]
+        alpha = tl.exp(m_i - m_new)                      # rescale old
+        p = tl.exp(s - m_new[:, None])                   # new weights [BLOCK_M, BLOCK_N]
+
+        # Update running sum and rescale accumulator
+        l_i = alpha * l_i + tl.sum(p, axis=1)
+        acc = alpha[:, None] * acc
+
+        # Load V block: [BLOCK_N, BLOCK_D]
+        v_mask = (cur_offs_n[:, None] < seq_k) & (offs_d[None, :] < head_dim)
+        v = tl.load(
+            v_base + cur_offs_n[:, None] * stride_vk + offs_d[None, :] * stride_vd,
+            mask=v_mask,
+            other=0.0,
+        )
+
+        # Accumulate: acc += P @ V
+        acc += tl.dot(p.to(v.dtype), v)
+
+        m_i = m_new
+
+    # Final normalization
+    acc = acc / l_i[:, None]
+
+    # Store output: [BLOCK_M, BLOCK_D]
+    o_base = o_ptr + pid_bh * stride_ob
+    o_mask = (offs_m[:, None] < seq_q) & (offs_d[None, :] < head_dim)
+    tl.store(
+        o_base + offs_m[:, None] * stride_oq + offs_d[None, :] * stride_od,
+        acc,
+        mask=o_mask,
+    )
+
+
+# ============================================================================
 # Attention Classes
 # ============================================================================
 
@@ -295,146 +426,64 @@ def scaled_dot_product_attention(
     if scale is None:
         scale = 1.0 / np.sqrt(head_dim)
 
-    try:
-        # Use bfloat16 for SDPA to enable Flash Attention / cuDNN backends
-        sdpa_dtype = torch.bfloat16 if q.is_cuda else torch.float32
-        output = F.scaled_dot_product_attention(
-            q.to(sdpa_dtype),
-            k.to(sdpa_dtype),
-            v.to(sdpa_dtype),
-            attn_mask=attention_mask,
-            dropout_p=0.0,
-            is_causal=is_causal,
-            scale=scale,
-            enable_gqa=use_gqa,
-        )
-        return output.to(q.dtype)
-    except (RuntimeError, TypeError):
-        pass
-
     if use_gqa:
         k = _expand_kv_heads(k, num_heads)
         v = _expand_kv_heads(v, num_heads)
 
-    seq_k_padded = next_power_of_two(seq_k)
     head_dim_padded = next_power_of_two(head_dim)
 
-    use_triton = (
-        q.is_cuda
-        and seq_k_padded <= MAX_ATTENTION_DIM
-        and head_dim_padded <= MAX_ATTENTION_DIM
-    )
+    if q.is_cuda:
+        # Fused Flash Attention kernel — single kernel launch with online softmax.
+        # No materialization of the full scores matrix in DRAM.
+        BH = batch * num_heads
+        q_flat = q.reshape(BH, seq_q, head_dim).contiguous().to(torch.float32)
+        k_flat = k.reshape(BH, seq_k, head_dim).contiguous().to(torch.float32)
+        v_flat = v.reshape(BH, seq_k, head_dim).contiguous().to(torch.float32)
 
-    if use_triton:
-        q_flat = q.reshape(batch * num_heads, seq_q, head_dim).to(torch.float32)
-        k_flat = k.reshape(batch * num_heads, seq_k, head_dim).to(torch.float32)
-        v_flat = v.reshape(batch * num_heads, seq_k, head_dim).to(torch.float32)
+        # Prepare attention mask for kernel (flatten batch*heads dimension)
+        has_mask = attention_mask is not None
+        if has_mask:
+            # attention_mask is (batch, 1, seq_q, seq_k) or (batch, num_heads, seq_q, seq_k)
+            mask_flat = attention_mask.expand(batch, num_heads, seq_q, seq_k)
+            mask_flat = mask_flat.reshape(BH, seq_q, seq_k).contiguous().to(torch.float32)
+            mask_strides = (mask_flat.stride(0), mask_flat.stride(1), mask_flat.stride(2))
+        else:
+            mask_flat = q_flat  # dummy, not accessed
+            mask_strides = (0, 0, 0)
 
-        if seq_k_padded != seq_k or head_dim_padded != head_dim:
-            k_padded = torch.zeros(
-                (batch * num_heads, seq_k_padded, head_dim_padded),
-                dtype=torch.float32,
-                device=q.device,
-            )
-            v_padded = torch.zeros_like(k_padded)
-            q_padded = torch.zeros(
-                (batch * num_heads, seq_q, head_dim_padded),
-                dtype=torch.float32,
-                device=q.device,
-            )
-            k_padded[:, :seq_k, :head_dim] = k_flat
-            v_padded[:, :seq_k, :head_dim] = v_flat
-            q_padded[:, :, :head_dim] = q_flat
-            k_flat = k_padded
-            v_flat = v_padded
-            q_flat = q_padded
-
-        scores = torch.empty(
-            (batch * num_heads, seq_q, seq_k_padded),
-            dtype=torch.float32,
-            device=q.device,
-        )
         output = torch.empty(
-            (batch * num_heads, seq_q, head_dim_padded),
-            dtype=torch.float32,
-            device=q.device,
+            (BH, seq_q, head_dim), dtype=torch.float32, device=q.device
         )
 
-        grid = (batch * num_heads, seq_q)
-        attention_scores_kernel[grid](
-            q_flat,
-            k_flat,
-            scores,
+        # Choose tile sizes based on head_dim to stay within shared memory (101KB limit)
+        BLOCK_D = head_dim_padded
+        if head_dim <= 64:
+            # Encoder: 20 heads, head_dim=64, seq~175
+            BLOCK_M = 128
+            BLOCK_N = 64
+        else:
+            # Decoder: 16 heads, head_dim=128
+            BLOCK_M = 64
+            BLOCK_N = 32
+
+        grid = (triton.cdiv(seq_q, BLOCK_M), BH)
+        flash_attention_kernel[grid](
+            q_flat, k_flat, v_flat, output,
+            mask_flat,
             float(scale),
-            seq_k_padded,
-            head_dim_padded,
-            q_flat.stride(0),
-            q_flat.stride(1),
-            q_flat.stride(2),
-            k_flat.stride(0),
-            k_flat.stride(1),
-            k_flat.stride(2),
-            scores.stride(0),
-            scores.stride(1),
-            scores.stride(2),
-            BLOCK_K=seq_k_padded,
-            BLOCK_D=head_dim_padded,
+            seq_q, seq_k, head_dim,
+            q_flat.stride(0), q_flat.stride(1), q_flat.stride(2),
+            k_flat.stride(0), k_flat.stride(1), k_flat.stride(2),
+            v_flat.stride(0), v_flat.stride(1), v_flat.stride(2),
+            output.stride(0), output.stride(1), output.stride(2),
+            mask_strides[0], mask_strides[1], mask_strides[2],
+            IS_CAUSAL=is_causal,
+            HAS_MASK=has_mask,
+            BLOCK_M=BLOCK_M,
+            BLOCK_N=BLOCK_N,
+            BLOCK_D=BLOCK_D,
+            num_stages=1,
         )
-
-        if seq_k_padded != seq_k:
-            scores[:, :, seq_k:] = -1e9
-
-        if is_causal:
-            mask = torch.triu(
-                torch.ones((seq_q, seq_k_padded), dtype=torch.float32, device=q.device),
-                diagonal=1,
-            ) * -1e9
-            scores = scores + mask[None, :, :]
-
-        if attention_mask is not None:
-            if attention_mask.ndim == 4:
-                attention_mask = attention_mask.reshape(
-                    batch * num_heads, seq_q, seq_k
-                )
-            if seq_k_padded != seq_k:
-                mask_padded = torch.zeros(
-                    (batch * num_heads, seq_q, seq_k_padded),
-                    dtype=torch.float32,
-                    device=q.device,
-                )
-                mask_padded[:, :, :seq_k] = attention_mask
-                mask_padded[:, :, seq_k:] = -1e9
-                attention_mask = mask_padded
-            scores = scores + attention_mask
-
-        scores_2d = scores.reshape(batch * num_heads * seq_q, seq_k_padded)
-        block = seq_k_padded
-        softmax_inplace_kernel[(scores_2d.shape[0],)](
-            scores_2d, scores_2d.stride(0), seq_k_padded, BLOCK_SIZE=block
-        )
-        scores = scores_2d.reshape(batch * num_heads, seq_q, seq_k_padded)
-
-        attention_output_kernel[grid](
-            scores,
-            v_flat,
-            output,
-            seq_k_padded,
-            head_dim_padded,
-            scores.stride(0),
-            scores.stride(1),
-            scores.stride(2),
-            v_flat.stride(0),
-            v_flat.stride(1),
-            v_flat.stride(2),
-            output.stride(0),
-            output.stride(1),
-            output.stride(2),
-            BLOCK_K=seq_k_padded,
-            BLOCK_D=head_dim_padded,
-        )
-
-        if head_dim_padded != head_dim:
-            output = output[:, :, :head_dim]
 
         return output.reshape(batch, num_heads, seq_q, head_dim).to(q.dtype)
 
@@ -458,51 +507,100 @@ def scaled_dot_product_attention(
     return output.to(q.dtype)
 
 
+def _reference_attention(q, k, v, attention_mask=None, is_causal=False, scale=None):
+    """Pure PyTorch reference for numerical parity testing."""
+    if scale is None:
+        scale = 1.0 / np.sqrt(q.shape[-1])
+    scores = torch.einsum("bnqd,bnkd->bnqk", q.float(), k.float()) * scale
+    if is_causal:
+        seq_q, seq_k = scores.shape[-2], scores.shape[-1]
+        causal = torch.triu(torch.ones(seq_q, seq_k, device=q.device), diagonal=1) * -1e9
+        scores = scores + causal[None, None]
+    if attention_mask is not None:
+        scores = scores + attention_mask.float()
+    scores = scores - scores.max(dim=-1, keepdim=True).values
+    weights = torch.exp(scores)
+    weights = weights / weights.sum(dim=-1, keepdim=True)
+    return torch.einsum("bnqk,bnkd->bnqd", weights, v.float()).to(q.dtype)
+
+
 if __name__ == "__main__":
-    print("Testing Triton Attention...")
+    print("Testing Triton Flash Attention with numerical parity assertions...")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    batch_size = 2
-    num_heads = 4
-    seq_len = 16
-    head_dim = 64
+    atol = 1e-2  # flash attention fp32 accumulation tolerance
 
-    q = torch.randn(batch_size, num_heads, seq_len, head_dim, device=device)
-    k = torch.randn(batch_size, num_heads, seq_len, head_dim, device=device)
-    v = torch.randn(batch_size, num_heads, seq_len, head_dim, device=device)
+    def check(name, got, ref):
+        diff = (got.float() - ref.float()).abs().max().item()
+        status = "PASS" if diff < atol else "FAIL"
+        print(f"  [{status}] {name}: max_diff={diff:.6f}")
+        assert diff < atol, f"{name} exceeded tolerance: {diff} > {atol}"
 
-    print("\nBasic attention:")
-    output = scaled_dot_product_attention(q, k, v)
-    print(f"  Output shape: {output.shape}")
+    # Test 1: Basic attention (head_dim=64, non-causal)
+    print("\n1. Basic attention (head_dim=64):")
+    b, h, s, d = 2, 4, 32, 64
+    q = torch.randn(b, h, s, d, device=device)
+    k = torch.randn(b, h, s, d, device=device)
+    v = torch.randn(b, h, s, d, device=device)
+    out = scaled_dot_product_attention(q, k, v)
+    ref = _reference_attention(q, k, v)
+    check("basic_hd64", out, ref)
 
-    print("\nCausal attention:")
-    output_causal = scaled_dot_product_attention(q, k, v, is_causal=True)
-    print(f"  Output shape: {output_causal.shape}")
+    # Test 2: Causal attention (head_dim=64)
+    print("\n2. Causal attention (head_dim=64):")
+    out_c = scaled_dot_product_attention(q, k, v, is_causal=True)
+    ref_c = _reference_attention(q, k, v, is_causal=True)
+    check("causal_hd64", out_c, ref_c)
 
-    print("\nWith attention mask:")
-    mask = torch.zeros(
-        (batch_size, num_heads, seq_len, seq_len), dtype=torch.float32, device=device
-    )
-    mask[:, :, :, seq_len // 2 :] = -1e9
-    output_masked = scaled_dot_product_attention(q, k, v, attention_mask=mask)
-    print(f"  Output shape: {output_masked.shape}")
+    # Test 3: Masked attention (head_dim=64)
+    print("\n3. Masked attention (head_dim=64):")
+    mask = torch.zeros(b, 1, s, s, device=device)
+    mask[:, :, :, s // 2:] = -1e9
+    out_m = scaled_dot_product_attention(q, k, v, attention_mask=mask)
+    ref_m = _reference_attention(q, k, v, attention_mask=mask.expand(b, h, s, s))
+    check("masked_hd64", out_m, ref_m)
 
-    print("\nGrouped Query Attention (GQA):")
-    num_kv_heads = 2
-    k_gqa = torch.randn(batch_size, num_kv_heads, seq_len, head_dim, device=device)
-    v_gqa = torch.randn(batch_size, num_kv_heads, seq_len, head_dim, device=device)
-    attn = MultiHeadAttention(
-        hidden_size=num_heads * head_dim,
-        num_heads=num_heads,
-        num_kv_heads=num_kv_heads,
-    )
-    output_gqa = attn(q, k_gqa, v_gqa)
-    print(f"  Output shape: {output_gqa.shape}")
+    # Test 4: GQA (4 Q heads, 2 KV heads, head_dim=64)
+    print("\n4. GQA (head_dim=64, 4Q/2KV):")
+    k_gqa = torch.randn(b, 2, s, d, device=device)
+    v_gqa = torch.randn(b, 2, s, d, device=device)
+    out_g = scaled_dot_product_attention(q, k_gqa, v_gqa)
+    k_exp = _expand_kv_heads(k_gqa, h)
+    v_exp = _expand_kv_heads(v_gqa, h)
+    ref_g = _reference_attention(q, k_exp, v_exp)
+    check("gqa_hd64", out_g, ref_g)
 
-    print("\nOutput statistics:")
-    print(f"  Mean: {float(output.mean()):.4f}")
-    print(f"  Std:  {float(output.std()):.4f}")
-    print(f"  Min:  {float(output.min()):.4f}")
-    print(f"  Max:  {float(output.max()):.4f}")
+    # Test 5: Basic attention (head_dim=128, decoder-like)
+    print("\n5. Basic attention (head_dim=128):")
+    d2 = 128
+    q2 = torch.randn(b, h, s, d2, device=device)
+    k2 = torch.randn(b, h, s, d2, device=device)
+    v2 = torch.randn(b, h, s, d2, device=device)
+    out2 = scaled_dot_product_attention(q2, k2, v2)
+    ref2 = _reference_attention(q2, k2, v2)
+    check("basic_hd128", out2, ref2)
 
-    print("\nTriton Attention working!")
+    # Test 6: Causal attention (head_dim=128)
+    print("\n6. Causal attention (head_dim=128):")
+    out2c = scaled_dot_product_attention(q2, k2, v2, is_causal=True)
+    ref2c = _reference_attention(q2, k2, v2, is_causal=True)
+    check("causal_hd128", out2c, ref2c)
+
+    # Test 7: Causal + mask combined (head_dim=128)
+    print("\n7. Causal + mask (head_dim=128):")
+    mask2 = torch.zeros(b, 1, s, s, device=device)
+    mask2[:, :, :, s // 2:] = -1e9  # mask out second half of positions
+    out2cm = scaled_dot_product_attention(q2, k2, v2, attention_mask=mask2, is_causal=True)
+    ref2cm = _reference_attention(q2, k2, v2, attention_mask=mask2.expand(b, h, s, s), is_causal=True)
+    check("causal_mask_hd128", out2cm, ref2cm)
+
+    # Test 8: Single-query decode (seq_q=1, seq_k=64, head_dim=128)
+    print("\n8. Decode step (seq_q=1, seq_k=64, head_dim=128):")
+    q_dec = torch.randn(b, h, 1, d2, device=device)
+    k_dec = torch.randn(b, h, 64, d2, device=device)
+    v_dec = torch.randn(b, h, 64, d2, device=device)
+    out_dec = scaled_dot_product_attention(q_dec, k_dec, v_dec)
+    ref_dec = _reference_attention(q_dec, k_dec, v_dec)
+    check("decode_hd128", out_dec, ref_dec)
+
+    print("\nAll parity tests passed!")
