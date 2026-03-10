@@ -10,11 +10,19 @@ Key Characteristics:
 import os
 import sys
 
+import torch
+
 _dir = os.path.dirname(os.path.abspath(__file__))
 if _dir not in sys.path:
     sys.path.insert(0, _dir)
 
 from . import layers
+
+torch.set_float32_matmul_precision("high")
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
 
 layers.Linear.BACKEND = "torch"
 layers.MLP.FUSED = True

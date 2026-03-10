@@ -11,6 +11,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 
@@ -706,12 +707,12 @@ class Linear:
 
         if self.weight.device != x.device:
             self.weight = self.weight.to(x.device)
-        output = x_2d @ self.weight.t()
-
+        bias = None
         if self.has_bias and self.bias_param is not None:
             if self.bias_param.device != x.device:
                 self.bias_param = self.bias_param.to(x.device)
-            output = output + self.bias_param
+            bias = self.bias_param
+        output = F.linear(x_2d, self.weight, bias)
 
         return output.reshape(*batch_dims, self.out_features)
 

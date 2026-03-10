@@ -284,8 +284,9 @@ def scaled_dot_product_attention(
     Scaled dot-product attention.
 
     Prefers PyTorch SDPA on supported runtimes because it can route to
-    fused attention kernels and handle GQA without materializing expanded KV
-    tensors. The Triton and Torch implementations remain as fallbacks.
+    fused attention kernels. For GQA, the current CUDA stack runs faster here
+    when KV heads are expanded explicitly before SDPA. The Triton and Torch
+    implementations remain as fallbacks.
     """
     batch, num_heads, seq_q, head_dim = q.shape
     _, num_kv_heads, seq_k, _ = k.shape
@@ -293,6 +294,13 @@ def scaled_dot_product_attention(
 
     if scale is None:
         scale = 1.0 / np.sqrt(head_dim)
+
+    if use_gqa:
+        # PyTorch's `enable_gqa=True` path can be slower than explicitly expanded
+        # KV tensors on current CUDA backends. The expand+reshape stays cheap here.
+        k = _expand_kv_heads(k, num_heads)
+        v = _expand_kv_heads(v, num_heads)
+        use_gqa = False
 
     try:
         output = F.scaled_dot_product_attention(
