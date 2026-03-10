@@ -198,6 +198,17 @@ flash_attention_kernel[grid](
 )
 ```
 
+### Attention Self-Test
+```bash
+cd hw1-asr/glm_asr_triton_template
+python attention.py
+```
+
+The current self-test is a deterministic 17-case parity suite. It prints the
+active device, warns if it is only exercising the CPU fallback path, and checks
+encoder-like ragged lengths, decoder-like prefill lengths, both mask layouts,
+GQA, single-token decode, decode with causal+mask, and non-power-of-two shapes.
+
 ### Tile Sizes (in layers.py)
 ```python
 # Linear layer tiles (used for Triton backend and fused kernels)
@@ -261,9 +272,9 @@ python benchmark_detailed.py glm_asr_triton_template
 
 | Implementation | Time | Speed | Accuracy |
 |----------------|------|-------|----------|
-| **Our template** | **109.0ms** | 8.39ms/tok | 100% |
+| **Our template** | **110.0ms** | 8.46ms/tok | 100% |
 | Example baseline | 261.3ms | 20.10ms/tok | 100% |
-| **Speedup** | **58.3%** | | |
+| **Speedup** | **57.9%** | | |
 
 ---
 
@@ -282,9 +293,9 @@ python benchmark_detailed.py glm_asr_triton_template
 - [x] bfloat16 weights — halves memory traffic for decode matmuls
 - [x] Fused Flash Attention — Triton kernel with online softmax, replaces SDPA and 3-kernel approach
 - [x] Flash Attention supports causal, attention_mask, and arbitrary seq lengths
-- [x] 8 numerical parity tests for Flash Attention (basic, causal, masked, GQA, hd64/128, decode)
+- [x] 17 deterministic numerical parity tests for Flash Attention, including ragged encoder/decode shapes and both mask layouts
 - [x] KV-cache generation — O(n) decode via native `generate_v8b` in model.py
-- [x] Total inference time < 200ms target (109.0ms achieved)
+- [x] Total inference time < 200ms target (110.0ms achieved)
 - [x] model.py, conv.py, weight_loader.py all match origin/ankush (zero diff)
 
 ---

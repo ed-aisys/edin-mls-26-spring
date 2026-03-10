@@ -328,18 +328,22 @@ kv_len = tl.minimum(seq_k, (pid_m + 1) * BLOCK_M)  # skip future blocks entirely
 
 ### 3.6 Numerical Parity Tests
 
-The file includes 8 parity tests (`__main__` block) that validate the Flash
-Attention kernel against a pure PyTorch reference:
-1. Basic attention (head_dim=64)
-2. Causal attention (head_dim=64)
-3. Masked attention (head_dim=64)
-4. GQA (4Q/2KV heads, head_dim=64)
-5. Basic attention (head_dim=128)
-6. Causal attention (head_dim=128)
-7. Causal + mask combined (head_dim=128)
-8. Decode step (seq_q=1, seq_k=64, head_dim=128)
+The file now includes a deterministic 17-case parity suite (`__main__` block)
+that validates the Flash Attention kernel against a pure PyTorch reference.
 
-All tests pass with max diff < 0.01 (fp32 accumulation tolerance).
+It covers:
+- basic and causal attention at `head_dim=64` and `head_dim=128`
+- additive masks with both `(batch, 1, seq_q, seq_k)` and `(batch, heads, seq_q, seq_k)` layouts
+- GQA cases (`16` query heads / `4` KV heads and smaller `4Q/2KV` cases)
+- encoder-like ragged lengths (`175`)
+- decoder-like prefill lengths (`93`)
+- single-token decode shapes
+- decode with both causal masking and additive attention masks
+- non-power-of-two shapes like `17 x 61`
+
+The test harness uses fixed RNG seeds and prints the active device so it is
+obvious whether it is validating the Triton CUDA path or only the CPU fallback.
+All current cases pass with max diff < `0.01` (fp32 accumulation tolerance).
 
 ---
 
@@ -573,8 +577,8 @@ def check_transcription(transcription, expected):
 ### Current Committed Benchmark
 
 On the RTX 5090 test box, the current committed runtime path measured:
-- `109.0ms` average end-to-end (with KV-cached `generate_v8b`)
-- `8.39 ms/token`
+- `110.0ms (+/- 0.3ms)` average end-to-end (with KV-cached `generate_v8b`)
+- `8.46 ms/token`
 - `100.0%` transcription accuracy
 
 ---

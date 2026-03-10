@@ -414,10 +414,9 @@ def scaled_dot_product_attention(
     """
     Scaled dot-product attention.
 
-    Prefers PyTorch SDPA on supported runtimes because it can route to
-    fused attention kernels. For GQA, the current CUDA stack runs faster here
-    when KV heads are expanded explicitly before SDPA. The Triton and Torch
-    implementations remain as fallbacks.
+    Uses the fused Triton flash-attention kernel on CUDA and a simple Torch
+    reference path on CPU. For GQA, KV heads are expanded explicitly so the
+    fused kernel always operates on matching query/key head counts.
     """
     batch, num_heads, seq_q, head_dim = q.shape
     _, num_kv_heads, seq_k, _ = k.shape
@@ -524,83 +523,113 @@ def _reference_attention(q, k, v, attention_mask=None, is_causal=False, scale=No
     return torch.einsum("bnqk,bnkd->bnqd", weights, v.float()).to(q.dtype)
 
 
+def _make_test_mask(kind: str, batch: int, num_heads: int, seq_q: int, seq_k: int, device):
+    """Create a deterministic additive attention mask for parity tests."""
+    if kind == "none":
+        return None
+
+    mask_heads = 1 if kind == "b1" else num_heads
+    mask = torch.zeros((batch, mask_heads, seq_q, seq_k), device=device, dtype=torch.float32)
+
+    # Mask a suffix so we exercise large blocked-out regions.
+    mask[..., seq_k // 2 :] = -1e9
+
+    # Also mask a small band in the middle to catch indexing bugs.
+    if seq_k > 8:
+        mid_start = seq_k // 3
+        mid_end = min(seq_k, mid_start + 2)
+        mask[..., : max(1, seq_q // 2), mid_start:mid_end] = -1e9
+
+    return mask
+
+
 if __name__ == "__main__":
     print("Testing Triton Flash Attention with numerical parity assertions...")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+    if device.type != "cuda":
+        print("Warning: CUDA is unavailable, so only the CPU fallback path is being tested.")
+
     atol = 1e-2  # flash attention fp32 accumulation tolerance
 
-    def check(name, got, ref):
-        diff = (got.float() - ref.float()).abs().max().item()
-        status = "PASS" if diff < atol else "FAIL"
-        print(f"  [{status}] {name}: max_diff={diff:.6f}")
-        assert diff < atol, f"{name} exceeded tolerance: {diff} > {atol}"
+    def run_case(name, seed, batch, num_heads, num_kv_heads, seq_q, seq_k, head_dim, *, is_causal=False, mask_kind="none"):
+        torch.manual_seed(seed)
 
-    # Test 1: Basic attention (head_dim=64, non-causal)
-    print("\n1. Basic attention (head_dim=64):")
-    b, h, s, d = 2, 4, 32, 64
-    q = torch.randn(b, h, s, d, device=device)
-    k = torch.randn(b, h, s, d, device=device)
-    v = torch.randn(b, h, s, d, device=device)
-    out = scaled_dot_product_attention(q, k, v)
-    ref = _reference_attention(q, k, v)
-    check("basic_hd64", out, ref)
+        q = torch.randn(batch, num_heads, seq_q, head_dim, device=device)
+        k = torch.randn(batch, num_kv_heads, seq_k, head_dim, device=device)
+        v = torch.randn(batch, num_kv_heads, seq_k, head_dim, device=device)
+        mask = _make_test_mask(mask_kind, batch, num_heads, seq_q, seq_k, device)
 
-    # Test 2: Causal attention (head_dim=64)
-    print("\n2. Causal attention (head_dim=64):")
-    out_c = scaled_dot_product_attention(q, k, v, is_causal=True)
-    ref_c = _reference_attention(q, k, v, is_causal=True)
-    check("causal_hd64", out_c, ref_c)
+        got = scaled_dot_product_attention(
+            q, k, v, attention_mask=mask, is_causal=is_causal
+        )
 
-    # Test 3: Masked attention (head_dim=64)
-    print("\n3. Masked attention (head_dim=64):")
-    mask = torch.zeros(b, 1, s, s, device=device)
-    mask[:, :, :, s // 2:] = -1e9
-    out_m = scaled_dot_product_attention(q, k, v, attention_mask=mask)
-    ref_m = _reference_attention(q, k, v, attention_mask=mask.expand(b, h, s, s))
-    check("masked_hd64", out_m, ref_m)
+        if num_kv_heads != num_heads:
+            k_ref = _expand_kv_heads(k, num_heads)
+            v_ref = _expand_kv_heads(v, num_heads)
+        else:
+            k_ref = k
+            v_ref = v
 
-    # Test 4: GQA (4 Q heads, 2 KV heads, head_dim=64)
-    print("\n4. GQA (head_dim=64, 4Q/2KV):")
-    k_gqa = torch.randn(b, 2, s, d, device=device)
-    v_gqa = torch.randn(b, 2, s, d, device=device)
-    out_g = scaled_dot_product_attention(q, k_gqa, v_gqa)
-    k_exp = _expand_kv_heads(k_gqa, h)
-    v_exp = _expand_kv_heads(v_gqa, h)
-    ref_g = _reference_attention(q, k_exp, v_exp)
-    check("gqa_hd64", out_g, ref_g)
+        if mask is not None and mask.shape[1] == 1:
+            mask_ref = mask.expand(batch, num_heads, seq_q, seq_k)
+        else:
+            mask_ref = mask
 
-    # Test 5: Basic attention (head_dim=128, decoder-like)
-    print("\n5. Basic attention (head_dim=128):")
-    d2 = 128
-    q2 = torch.randn(b, h, s, d2, device=device)
-    k2 = torch.randn(b, h, s, d2, device=device)
-    v2 = torch.randn(b, h, s, d2, device=device)
-    out2 = scaled_dot_product_attention(q2, k2, v2)
-    ref2 = _reference_attention(q2, k2, v2)
-    check("basic_hd128", out2, ref2)
+        ref = _reference_attention(
+            q, k_ref, v_ref, attention_mask=mask_ref, is_causal=is_causal
+        )
 
-    # Test 6: Causal attention (head_dim=128)
-    print("\n6. Causal attention (head_dim=128):")
-    out2c = scaled_dot_product_attention(q2, k2, v2, is_causal=True)
-    ref2c = _reference_attention(q2, k2, v2, is_causal=True)
-    check("causal_hd128", out2c, ref2c)
+        diff = (got.float() - ref.float()).abs()
+        max_diff = diff.max().item()
+        mean_diff = diff.mean().item()
+        status = "PASS" if max_diff < atol else "FAIL"
+        print(f"  [{status}] {name}: max_diff={max_diff:.6f} mean_diff={mean_diff:.6f}")
+        assert max_diff < atol, f"{name} exceeded tolerance: {max_diff} > {atol}"
 
-    # Test 7: Causal + mask combined (head_dim=128)
-    print("\n7. Causal + mask (head_dim=128):")
-    mask2 = torch.zeros(b, 1, s, s, device=device)
-    mask2[:, :, :, s // 2:] = -1e9  # mask out second half of positions
-    out2cm = scaled_dot_product_attention(q2, k2, v2, attention_mask=mask2, is_causal=True)
-    ref2cm = _reference_attention(q2, k2, v2, attention_mask=mask2.expand(b, h, s, s), is_causal=True)
-    check("causal_mask_hd128", out2cm, ref2cm)
+    gpu_cases = [
+        ("basic_hd64_seq32", 1000, 2, 4, 4, 32, 32, 64, False, "none"),
+        ("causal_hd64_seq32", 1001, 2, 4, 4, 32, 32, 64, True, "none"),
+        ("masked_b1_hd64_seq32", 1002, 2, 4, 4, 32, 32, 64, False, "b1"),
+        ("gqa_hd64_seq32", 1003, 2, 4, 2, 32, 32, 64, False, "none"),
+        ("encoder_ragged_175", 1004, 1, 20, 20, 175, 175, 64, False, "none"),
+        ("encoder_ragged_175_mask1", 1005, 1, 20, 20, 175, 175, 64, False, "b1"),
+        ("encoder_short_47_maskh", 1006, 2, 20, 20, 47, 47, 64, False, "bh"),
+        ("basic_hd128_seq32", 1007, 2, 4, 4, 32, 32, 128, False, "none"),
+        ("causal_hd128_seq32", 1008, 2, 4, 4, 32, 32, 128, True, "none"),
+        ("causal_mask_hd128_seq32", 1009, 2, 4, 4, 32, 32, 128, True, "b1"),
+        ("decoder_prefill_93", 1010, 1, 16, 16, 93, 93, 128, True, "none"),
+        ("decoder_prefill_93_mask1", 1011, 1, 16, 16, 93, 93, 128, True, "b1"),
+        ("decoder_prefill_gqa_93", 1012, 1, 16, 4, 93, 93, 128, True, "none"),
+        ("decode_step_1x64", 1013, 2, 4, 4, 1, 64, 128, False, "none"),
+        ("decode_step_causal_mask_1x64", 1014, 2, 4, 4, 1, 64, 128, True, "b1"),
+        ("decode_step_gqa_1x93", 1015, 2, 16, 4, 1, 93, 128, False, "bh"),
+        ("decoder_nonpow2_17x61", 1016, 2, 16, 4, 17, 61, 128, False, "b1"),
+    ]
+    cpu_cases = [
+        ("basic_hd64_seq32", 1000, 2, 4, 4, 32, 32, 64, False, "none"),
+        ("causal_hd64_seq32", 1001, 2, 4, 4, 32, 32, 64, True, "none"),
+        ("masked_b1_hd64_seq32", 1002, 2, 4, 4, 32, 32, 64, False, "b1"),
+        ("gqa_hd64_seq32", 1003, 2, 4, 2, 32, 32, 64, False, "none"),
+        ("decode_step_causal_mask_1x64", 1014, 2, 4, 4, 1, 64, 128, True, "b1"),
+    ]
 
-    # Test 8: Single-query decode (seq_q=1, seq_k=64, head_dim=128)
-    print("\n8. Decode step (seq_q=1, seq_k=64, head_dim=128):")
-    q_dec = torch.randn(b, h, 1, d2, device=device)
-    k_dec = torch.randn(b, h, 64, d2, device=device)
-    v_dec = torch.randn(b, h, 64, d2, device=device)
-    out_dec = scaled_dot_product_attention(q_dec, k_dec, v_dec)
-    ref_dec = _reference_attention(q_dec, k_dec, v_dec)
-    check("decode_hd128", out_dec, ref_dec)
+    cases = gpu_cases if device.type == "cuda" else cpu_cases
+    for idx, case in enumerate(cases, start=1):
+        name, seed, batch, num_heads, num_kv_heads, seq_q, seq_k, head_dim, is_causal, mask_kind = case
+        print(f"\n{idx}. {name}:")
+        run_case(
+            name,
+            seed,
+            batch,
+            num_heads,
+            num_kv_heads,
+            seq_q,
+            seq_k,
+            head_dim,
+            is_causal=is_causal,
+            mask_kind=mask_kind,
+        )
 
     print("\nAll parity tests passed!")

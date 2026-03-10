@@ -15,7 +15,7 @@ Completed all 10 Triton kernel implementations for the GLM-ASR speech-to-text mo
 The project is a University of Edinburgh MLS course assignment implementing GPU kernels
 for a multi-modal transformer (audio encoder + text decoder).
 
-**Final benchmark result: 109.0ms average, 100% transcription accuracy, 58.3% faster than baseline.**
+**Final benchmark result: 110.0ms average, 100% transcription accuracy, 57.9% faster than baseline.**
 
 ---
 
@@ -249,8 +249,13 @@ for `generate_v8b` and uses it when available.
 - Tile sizes: BLOCK_M=128/BLOCK_N=64 for head_dim≤64, BLOCK_M=64/BLOCK_N=32 for head_dim=128
 - `num_stages=1` to fit within RTX 5090's 101KB shared memory limit
 - GQA handled via `_expand_kv_heads` before kernel call
-- 8 numerical parity tests added (basic, causal, masked, GQA, head_dim=64/128, decode)
-- Result: 109.0ms — faster than SDPA (113.0ms) and fully GUIDE.md compliant
+- Result: clean 3-run benchmark at `110.0ms` average, faster than the earlier SDPA path (`113.0ms`) and GUIDE.md compliant
+
+#### 6.9 Expanded Attention Validation
+- `attention.py` self-test expanded from a small smoke/parity set to a deterministic 17-case parity suite
+- Added fixed RNG seeds and explicit device reporting (`cuda` vs CPU fallback)
+- Coverage now includes encoder-like ragged lengths (`175`), decoder-like prefill lengths (`93`), both mask layouts (`batch,1,...` and `batch,heads,...`), GQA, single-token decode, decode with causal+mask, and non-power-of-two shapes (`17x61`)
+- GPU parity validation now passes across all 17 cases with max diff below `1e-2`
 
 ---
 
@@ -259,9 +264,9 @@ for `generate_v8b` and uses it when available.
 ### Our Implementation (`glm_asr_triton_template`)
 | Metric | Value |
 |--------|-------|
-| **Average time** | **109.0ms** (+/- 0.2ms) |
+| **Average time** | **110.0ms** (+/- 0.3ms) |
 | **Tokens** | 13 |
-| **Speed** | 8.39 ms/token |
+| **Speed** | 8.46 ms/token |
 | **Accuracy** | 100.0% |
 | **Transcription** | "Concord returned to its place amidst the tents." |
 
@@ -274,7 +279,7 @@ for `generate_v8b` and uses it when available.
 | **Accuracy** | 100.0% |
 
 ### Comparison
-- **58.3% faster** than the example baseline (109.0ms vs 261.3ms)
+- **57.9% faster** than the example baseline (110.0ms vs 261.3ms)
 
 ### Optimization Progression
 | Change | Time | Delta |
@@ -282,7 +287,7 @@ for `generate_v8b` and uses it when available.
 | Baseline (example) | 261.3ms | -- |
 | All kernels + cuBLAS + TF32 | 209.8ms | -51.5ms |
 | bf16 weights + bf16 SDPA + native GQA | 113.0ms | -96.8ms |
-| Fused Flash Attention kernel (Triton) | 109.0ms | -4.0ms |
+| Fused Flash Attention kernel (Triton), clean revalidation | 110.0ms | -3.0ms |
 
 ---
 
@@ -371,5 +376,4 @@ pip uninstall nvidia-cublas    # Remove if version mismatches
 6. `a14e2d5` — Codex commit: optimize Triton template runtime path
 7. `9453c39` — Claude commit: KV-cache generate + bf16 weights + native GQA (128.7ms, 51% faster)
 8. `f38ade2` — Claude commit: update docs + fix duplicate GQA bug
-9. (pending) — Claude commit: restore model.py/conv.py + remove monkey-patch + SDPA removal
-10. (pending) — Claude commit: fused Flash Attention kernel + mask support + parity tests
+9. `e0bea91` — Claude commit: restore model.py/conv.py to origin, remove monkey-patch, update docs (113.0ms)

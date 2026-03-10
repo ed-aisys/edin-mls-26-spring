@@ -312,9 +312,13 @@ The output is duplicated into both halves (first half = second half) because
 ```bash
 cd hw1-asr/glm_asr_triton_template
 python layers.py        # Tests RMSNorm, LayerNorm, GELU, SiLU, Linear, Softmax, MLP
-python attention.py     # Tests attention score, softmax, output
+python attention.py     # 17-case numerical parity suite for Flash Attention
 python rope.py          # Tests RoPE frequency computation
 ```
+
+`attention.py` is now more than a smoke test. It runs deterministic parity
+checks against a pure PyTorch reference, prints the active device, and warns
+when it is only exercising the CPU fallback path instead of the Triton CUDA path.
 
 ### End-to-end benchmark:
 ```bash
@@ -451,7 +455,7 @@ with 170 SMs), larger blocks reduce launch overhead.
 
 | Implementation | Time | Speed | vs Baseline |
 |----------------|------|-------|-------------|
-| Our optimized template | **109.0ms** | 8.39ms/tok | **58.3% faster** |
+| Our optimized template | **110.0ms** | 8.46ms/tok | **57.9% faster** |
 | Example baseline | 261.3ms | 20.10ms/tok | -- |
 | CPU fallback (no GPU) | ~14,000ms | ~1,000ms/tok | -- |
 
@@ -461,6 +465,10 @@ Key optimizations ranked by impact:
 3. **Fused Flash Attention** — Triton kernel with online softmax, replaces SDPA and 3-kernel approach
 4. **Fused SwiGLU + EncoderMLP** — reduces kernel launch overhead and DRAM round-trips
 5. **KV-cached generation** — natively in model.py, O(n) decode instead of O(n^2)
+
+Validation coverage for the current attention path is also stronger than before:
+- deterministic 17-case parity suite in `attention.py`
+- covers ragged encoder lengths, decoder prefill lengths, both attention-mask layouts, GQA, single-token decode, decode with causal+mask, and non-power-of-two shapes
 
 ---
 
