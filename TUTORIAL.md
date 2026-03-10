@@ -46,11 +46,11 @@ environment before writing any code.
 ```
 hw1-asr/
   glm_asr_triton_template/    <- YOUR WORK (fill in TODOs)
-    layers.py                  <- 6 kernels to implement
+    layers.py                  <- 6 kernels to implement + layer classes
     attention.py               <- 3 kernels to implement
     rope.py                    <- 1 kernel to implement
     __init__.py                <- Configuration (backend, fusion flags)
-    model.py                   <- DO NOT MODIFY
+    model.py                   <- DO NOT MODIFY (includes KV-cached generate_v8b)
     conv.py                    <- DO NOT MODIFY
     weight_loader.py           <- DO NOT MODIFY
 
@@ -61,6 +61,10 @@ hw1-asr/
 ```
 
 **Important:** Per GUIDE.md, you must NOT modify `model.py`, `weight_loader.py`, or `conv.py`.
+
+**Note:** `model.py` imports `EncoderMLP` and `LinearGELU` from `layers.py`. These
+classes must exist and work correctly. `model.py` also natively includes `generate_v8b()`
+with KV-cached generation — no need to add this yourself.
 
 ---
 
@@ -330,9 +334,14 @@ tensor-core kernels for float32-heavy paths.
 layers.MLP.FUSED = True           # Fused SwiGLU in decoder MLP
 layers.EncoderMLP.FUSED = True    # Fused Linear+GELU in encoder MLP
 ```
-Note: `EncoderMLP.FUSED` only takes effect if model.py uses the `EncoderMLP` class.
-The original model.py uses separate `fc1`/`fc2` calls, so this flag has no effect
-with the unmodified model. `MLP.FUSED` does work for the decoder's SwiGLU.
+`model.py` uses both `MLP` (decoder SwiGLU) and `EncoderMLP` (encoder GELU MLP).
+Both fusion flags are active and provide speedup.
+
+**Note on LinearGELU:** `model.py` also uses `LinearGELU` for the projector, but
+`LinearGELU.FUSED` is set to `False` in layers.py because the projector's large
+dimensions (5120x4096) with tile sizes 128x128x64 require 131KB shared memory,
+exceeding the RTX 5090's 101KB limit. The unfused cuBLAS + separate GELU path
+is used instead.
 
 ### 6.4 Tune Tile/Block Sizes
 ```python
@@ -367,8 +376,7 @@ output = F.scaled_dot_product_attention(
 ```
 
 Casting Q/K/V to bfloat16 unlocks Flash Attention and cuDNN attention backends
-in PyTorch, which only support fp16/bf16 — not float32. This gave a measurable
-speedup (138ms -> 135ms).
+in PyTorch, which only support fp16/bf16 — not float32.
 
 ### 6.7 Native GQA
 ```python
@@ -383,52 +391,7 @@ Instead of explicitly expanding KV heads before SDPA, pass `enable_gqa=True`
 and let the SDPA backend handle GQA natively. This avoids the memory copies
 from `_expand_kv_heads()` and is faster with bf16 inputs.
 
-### 6.8 KV-Cached Generation (`generate_v8b`)
-
-The biggest single optimization. The original `model.py` `generate()` method
-re-runs the **full sequence** through all 28 decoder layers for each new token
-(O(n^2) decode cost). However, model.py already contains KV cache infrastructure:
-
-- `TextDecoder.allocate_kv_buffers()` — pre-allocates KV storage
-- `TextDecoder.forward_with_kv_buffers()` — forward pass with KV cache
-
-You can add a `generate_v8b` method that uses this infrastructure without
-modifying model.py, by monkey-patching from `layers.py`:
-
-```python
-# In layers.py:
-def _generate_v8b(self, input_features, input_ids=None, ...):
-    audio_embeds = self.encode_audio(input_features, input_features_mask)
-    # ... build inputs_embeds (same as model.generate) ...
-    kv_buffers = self.text_decoder.allocate_kv_buffers(batch_size, max_len)
-    hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(
-        inputs_embeds, kv_buffers, 0
-    )
-    logits = self.lm_head(hidden)
-    for _ in range(max_new_tokens):
-        # ... sample next token ...
-        new_embeds = self.text_decoder.embed_tokens(next_token)
-        hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(
-            new_embeds, kv_buffers, cache_pos
-        )
-        logits = self.lm_head(hidden)
-
-def _try_patch_model():
-    """Attach generate_v8b to GlmAsrModel once it's available."""
-    model_mod = sys.modules.get("model")
-    if model_mod is None:
-        return
-    cls = getattr(model_mod, "GlmAsrModel", None)
-    if cls and not hasattr(cls, "generate_v8b"):
-        cls.generate_v8b = _generate_v8b
-
-# Call from Linear.__init__() so it runs when the model is being constructed
-```
-
-`benchmark_student.py` checks `hasattr(model, 'generate_v8b')` and uses it
-when available. This reduced decode from O(n^2) to O(n): 209.8ms -> 156ms.
-
-### 6.9 Activation Block Size
+### 6.8 Activation Block Size
 GELU and SiLU use BLOCK_SIZE=1024 by default. On GPUs with many SMs (like RTX 5090
 with 170 SMs), larger blocks reduce launch overhead.
 
@@ -441,6 +404,7 @@ with 170 SMs), larger blocks reduce launch overhead.
 | `CUDA error: invalid configuration argument` | BLOCK_SIZE too large | Reduce to power of 2, max ~1024 |
 | `triton.CompilationError` | Mismatched tensor shapes | Check mask dimensions match data |
 | `CUBLAS_STATUS_INVALID_VALUE` | cuBLAS version mismatch | `pip uninstall nvidia-cublas` (use system libs) |
+| `OutOfResources: shared memory` | Fused kernel tiles too large | Reduce tile sizes or disable fusion |
 | Values all zero | Mask not applied correctly | Verify `offs < size` mask |
 | NaN/Inf in output | Missing numerical stability | Subtract max before exp in softmax |
 | Wrong matmul results | Stride computation error | Print strides, verify A(M,K) @ B(K,N) |
@@ -453,28 +417,17 @@ with 170 SMs), larger blocks reduce launch overhead.
 
 | Implementation | Time | Speed | vs Baseline |
 |----------------|------|-------|-------------|
-| Our optimized template | **128.7ms** | 9.9ms/tok | **50.7% faster** |
+| Our optimized template | **113.0ms** | 8.69ms/tok | **56.7% faster** |
 | Example baseline | 261.3ms | 20.10ms/tok | -- |
 | CPU fallback (no GPU) | ~14,000ms | ~1,000ms/tok | -- |
 
-### Optimization Progression
-| Change | Time | Delta |
-|--------|------|-------|
-| Baseline (example) | 261.3ms | -- |
-| All kernels + cuBLAS + TF32 | 209.8ms | -51.5ms |
-| KV cache (generate_v8b) | 156ms | -53.8ms |
-| Micro-optimizations | 152ms | -4ms |
-| bfloat16 weights | 138ms | -14ms |
-| bfloat16 SDPA | 135ms | -3ms |
-| Native GQA | 128.7ms | -6.3ms |
-
 Key optimizations ranked by impact:
-1. **KV-cache generation** (-53.8ms) — O(n) decode instead of O(n^2)
-2. **cuBLAS-backed `F.linear`** + TF32 flags (-51.5ms)
-3. **bfloat16 weights** (-14ms) — halves memory traffic for decode matmuls
-4. **Native GQA** (-6.3ms) — eliminates KV head expansion memory copies
-5. **Fused SwiGLU** + micro-opts (-4ms)
-6. **bfloat16 SDPA** (-3ms) — enables Flash Attention backends
+1. **cuBLAS-backed `F.linear`** + TF32 flags — cuBLAS outperforms Triton linear kernel
+2. **bfloat16 weights** — halves memory traffic for decode matmuls
+3. **bfloat16 SDPA** — enables Flash Attention backends
+4. **Native GQA** — eliminates KV head expansion memory copies
+5. **Fused SwiGLU + EncoderMLP** — reduces kernel launch overhead and DRAM round-trips
+6. **KV-cached generation** — natively in model.py, O(n) decode instead of O(n^2)
 
 ---
 

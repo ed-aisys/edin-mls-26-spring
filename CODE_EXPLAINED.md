@@ -46,7 +46,7 @@ These are general-purpose and highly optimized, but:
 ### File Modification Rules
 
 Per GUIDE.md, these files are **read-only** (shared infrastructure):
-- `model.py` — model architecture and generation loop
+- `model.py` — model architecture and generation loop (includes `generate_v8b` with KV cache)
 - `weight_loader.py` — loads pre-trained weights from HuggingFace
 - `conv.py` — 1D convolution for audio subsampling
 
@@ -56,8 +56,8 @@ You can only modify: `layers.py`, `attention.py`, `rope.py`, `__init__.py`.
 
 ## 2. layers.py — GPU Compute Kernels
 
-This is the core file containing all neural network building blocks, plus the
-KV-cached generation function and deferred model patching.
+This is the core file containing all neural network building blocks as Triton
+kernels and Python layer classes.
 
 ### 2.1 Helper Functions
 
@@ -105,7 +105,7 @@ root mean square. This is ~10% faster because it skips the mean computation.
 
 ### 2.4 GELU Kernel
 
-**Purpose:** Non-linear activation function for audio encoder MLP.
+**Purpose:** Non-linear activation function for audio encoder MLP and projector.
 
 **Math (tanh approximation):**
 ```
@@ -115,7 +115,7 @@ y = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 Uses `tl.extra.cuda.libdevice.tanh` for the tanh computation — this calls into
 NVIDIA's libdevice math library for hardware-optimized transcendental functions.
 
-**Where used:** Audio encoder MLP (`fc1 -> GELU -> fc2`), Projector MLP
+**Where used:** Audio encoder MLP (via `EncoderMLP`), Projector (via `LinearGELU`)
 
 ### 2.5 SiLU Kernel
 
@@ -171,7 +171,7 @@ By subtracting the maximum value first, the largest exponent is `exp(0) = 1`.
 
 ### 2.8 Fused Kernels (Pre-implemented in the template)
 
-**linear_gelu_kernel:** Computes `GELU(x @ W)` in a single kernel launch.
+**linear_gelu_kernel:** Computes `GELU(x @ W + b)` in a single kernel launch.
 Instead of: matmul -> write to DRAM -> read from DRAM -> GELU,
 it does: matmul -> GELU (all in registers). Eliminates one DRAM round-trip.
 
@@ -199,8 +199,6 @@ Fuses THREE operations: two matmuls and the gating. Input `x` is loaded once.
 - The committed configuration keeps the cuBLAS path because it wins end-to-end
   on this RTX 5090 stack
 - Caches transposed/padded weights (`_weight_t_padded`) for Triton path
-- `Linear.__init__` calls `_try_patch_model()` to register `generate_v8b`
-  on `GlmAsrModel` (see Section 2.11)
 
 **`MLP` class:** Implements SwiGLU gating for the text decoder:
 ```
@@ -208,92 +206,20 @@ output = down_proj(SiLU(gate_proj(x)) * up_proj(x))
 ```
 When `FUSED=True`, uses `swiglu_fused_kernel` for the gate+up computation.
 
-**`EncoderMLP` class:** Simpler MLP without gating for audio encoder:
+**`EncoderMLP` class:** Simpler MLP without gating for the audio encoder:
 ```
 output = fc2(GELU(fc1(x)))
 ```
 When `FUSED=True`, uses `linear_gelu_kernel` for fc1+GELU.
-Note: The original `model.py` does NOT use `EncoderMLP` — it uses separate
-`fc1`/`fc2` + `gelu()` calls. So this class exists in layers.py but is not
-instantiated by the unmodified model.
+`model.py` uses `EncoderMLP` for encoder layers (`self.mlp = EncoderMLP(...)`),
+and aliases `self.fc1 = self.mlp.fc1` / `self.fc2 = self.mlp.fc2` for weight loading.
 
-**`LinearGELU` class:** A helper for `GELU(Linear(x))` used by the projector
-*only if model.py creates one*. The original model.py uses separate
-`linear_1` + `gelu()` calls instead.
-
-### 2.10 KV-Cached Generation (`_generate_v8b`)
-
-**Purpose:** Replaces model.py's `generate()` with an O(n) decode path that
-uses the model's existing KV cache infrastructure.
-
-**Why it exists:** The original `model.py` `generate()` re-runs the full
-sequence through all 28 decoder layers for every new token (O(n^2)). This is
-the single biggest performance bottleneck. However, model.py already contains:
-- `TextDecoder.allocate_kv_buffers(batch_size, max_seq_len)` — pre-allocates KV storage
-- `TextDecoder.forward_with_kv_buffers(embeds, kv_buffers, cache_pos)` — forward
-  pass that reads/writes cached KV states
-
-`_generate_v8b` uses these existing methods to implement efficient generation:
-
-```python
-def _generate_v8b(self, input_features, input_ids=None, ...):
-    # 1. Encode audio (same as model.generate)
-    audio_embeds = self.encode_audio(input_features, input_features_mask)
-
-    # 2. Build inputs_embeds (same splice logic as model.generate)
-    # ... replace audio placeholders with audio embeddings ...
-
-    # 3. Allocate KV buffers for all decoder layers
-    kv_buffers = self.text_decoder.allocate_kv_buffers(
-        batch_size, prefill_len + max_new_tokens
-    )
-
-    # 4. Prefill: process full sequence once, cache all KV states
-    hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(
-        inputs_embeds, kv_buffers, 0
-    )
-    logits = self.lm_head(hidden)
-
-    # 5. Decode loop: only pass the new token each step
-    for _ in range(max_new_tokens):
-        next_token = sample(logits[:, -1, :])
-        if next_token == EOS: break
-        new_embeds = self.text_decoder.embed_tokens(next_token)
-        hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(
-            new_embeds, kv_buffers, cache_pos  # Only 1 token!
-        )
-        logits = self.lm_head(hidden)
-```
-
-**Impact:** 209.8ms -> 156ms (the single biggest optimization, -53.8ms).
-
-### 2.11 Deferred Model Patching (`_try_patch_model`)
-
-**Problem:** `generate_v8b` must be attached to `GlmAsrModel`, but we cannot
-modify `model.py`. The natural place is `__init__.py`, but `benchmark_student.py`
-imports modules directly (not as a package), so `__init__.py` never executes.
-
-**Solution:** `_try_patch_model()` is called from `Linear.__init__()`. Since
-every model layer uses `Linear`, this runs during model construction:
-
-```python
-_MODEL_PATCHED = False
-
-def _try_patch_model():
-    global _MODEL_PATCHED
-    if _MODEL_PATCHED:
-        return
-    model_mod = sys.modules.get("model")  # Check if model.py has been imported
-    if model_mod is None:
-        return
-    cls = getattr(model_mod, "GlmAsrModel", None)
-    if cls and not hasattr(cls, "generate_v8b"):
-        cls.generate_v8b = _generate_v8b
-    _MODEL_PATCHED = True
-```
-
-`benchmark_student.py` then checks `hasattr(model, 'generate_v8b')` and uses
-it when available (it also checks for `generate_v8` and `generate_v6`).
+**`LinearGELU` class:** A `GELU(Linear(x))` wrapper used by the projector.
+`model.py` creates `self.linear_1_gelu = LinearGELU(5120, 4096)` for the
+first projector layer. `FUSED` is set to `False` in layers.py because the
+large dimensions (5120x4096) with tile sizes 128x128x64 require 131KB shared
+memory, exceeding the RTX 5090's hardware limit of 101KB. The unfused path
+(cuBLAS matmul + separate GELU kernel) is used instead.
 
 ---
 
@@ -367,13 +293,6 @@ scores = tl.where(offs_k > current_pos, -1e9, scores)
 ```
 Setting future positions to `-1e9` makes them zero after softmax.
 
-### 3.6 Known Issue: Duplicate GQA Expansion
-
-Lines 315-321 of attention.py contain two identical `if use_gqa` blocks in the
-fallback path (after the SDPA try/except). This means KV heads would be expanded
-twice if the fallback path were triggered. This only affects the Triton/Torch
-fallback — the primary SDPA path handles GQA correctly.
-
 ---
 
 ## 4. rope.py — Positional Encodings
@@ -441,22 +360,26 @@ class AudioEncoder:
 4. 32x transformer layers with partial RoPE
 5. Final LayerNorm
 
-**AudioEncoderLayer MLP:** Uses separate `fc1` + `gelu()` + `fc2` calls
-(NOT the `EncoderMLP` class, even though it exists in layers.py).
+**AudioEncoderLayer MLP:** Uses `EncoderMLP` class from layers.py:
+```python
+self.mlp = EncoderMLP(hidden_size, intermediate_size, activation="gelu", bias=True)
+self.fc1 = self.mlp.fc1  # Alias for weight loading
+self.fc2 = self.mlp.fc2
+```
+When `EncoderMLP.FUSED = True`, the fused `linear_gelu_kernel` is used for fc1+GELU.
 
 ### 5.2 MultiModalProjector
 
 Bridges audio and text spaces:
 ```python
 class MultiModalProjector:
-    pool_factor = 4  # Concatenate 4 frames -> 1
-    linear_1: Linear(5120, 4096)    # 1280*4 = 5120
-    act = gelu                       # Standalone gelu() function
-    linear_2: Linear(4096, 2048)    # Match text hidden size
+    pool_factor = 4                       # Concatenate 4 frames -> 1
+    linear_1_gelu: LinearGELU(5120, 4096) # Fused Linear+GELU (fusion disabled due to shared mem)
+    linear_2: Linear(4096, 2048)          # Match text hidden size
 ```
 
 Pool 4 audio frames by concatenation: `(1, T/2, 1280)` -> `(1, T/8, 5120)`
-Then `linear_1` -> `gelu` -> `linear_2`.
+Then `LinearGELU(5120->4096)` -> `Linear(4096->2048)`.
 
 ### 5.3 TextDecoder
 
@@ -487,40 +410,37 @@ Each decoder layer:
 
 ### 5.5 Generation Pipeline
 
-**Original `generate()` (O(n^2) — no KV cache):**
-```python
-def generate(input_features, input_ids, ...):
-    audio_embeds = self.encode_audio(input_features)
-    inputs_embeds = [text_before_audio | audio_embeds | text_after_audio]
-    for _ in range(max_new_tokens):
-        logits = self.decode(inputs_embeds=inputs_embeds)  # Full sequence!
-        next_token = sample_or_argmax(logits[:, -1, :])
-        if next_token == EOS: break
-        new_embeds = embed(next_token)
-        inputs_embeds = cat([inputs_embeds, new_embeds], dim=1)  # Grows each step
-```
+**`generate()` delegates to `generate_v8b()` — both are natively in model.py.**
 
-**Optimized `generate_v8b()` (O(n) — with KV cache, monkey-patched from layers.py):**
-```python
-def generate_v8b(input_features, input_ids, ...):
-    audio_embeds = self.encode_audio(input_features)
-    inputs_embeds = [text_before_audio | audio_embeds | text_after_audio]
+`generate_v8b()` uses KV-cached O(n) decode:
 
-    # Prefill: process full sequence once, cache KV states
+```python
+def generate_v8b(self, input_features, input_ids=None, ...):
+    # 1. Prepare inputs (encode audio, splice into text embeddings)
+    inputs_embeds, seed_tokens = self._prepare_generation_inputs(...)
+
+    # 2. Allocate KV buffers for all 28 decoder layers
     kv_buffers = self.text_decoder.allocate_kv_buffers(batch_size, max_len)
+
+    # 3. Prefill: process full sequence once, cache all KV states
     hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(
         inputs_embeds, kv_buffers, 0
     )
+    logits = self.lm_head(hidden[:, -1:, :])
 
-    # Decode: only process the new token each step
+    # 4. Decode loop: only pass the new token each step
     for _ in range(max_new_tokens):
-        next_token = sample(logits[:, -1, :])
-        if next_token == EOS: break
-        new_embeds = embed(next_token)
+        next_token = self._sample_next_token(logits[:, -1, :] / temperature, ...)
+        if all_finished: break
+        next_embeds = self.text_decoder.embed_tokens(next_token)
         hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(
-            new_embeds, kv_buffers, cache_pos  # Just 1 token!
+            next_embeds, kv_buffers, cache_pos  # Just 1 token!
         )
+        logits = self.lm_head(hidden[:, -1:, :])
 ```
+
+`benchmark_student.py` checks `hasattr(model, 'generate_v8b')` and uses it
+when available.
 
 ---
 
@@ -570,13 +490,13 @@ processor.apply_transcription_request(audio_array)
 ```python
 # benchmark_student.py checks for optimized generate methods:
 if hasattr(model, 'generate_v8b'):
-    generate_fn = model.generate_v8b    # KV-cached (from layers.py monkey-patch)
+    generate_fn = model.generate_v8b    # KV-cached (natively in model.py)
 elif hasattr(model, 'generate_v8'):
     generate_fn = model.generate_v8
 elif hasattr(model, 'generate_v6'):
     generate_fn = model.generate_v6
 else:
-    generate_fn = model.generate        # Original O(n^2) path
+    generate_fn = model.generate        # Fallback
 ```
 
 ### Benchmark Loop
@@ -605,8 +525,8 @@ def check_transcription(transcription, expected):
 ### Current Committed Benchmark
 
 On the RTX 5090 test box, the current committed runtime path measured:
-- `128.7ms` average end-to-end (with KV-cached `generate_v8b`)
-- `9.9 ms/token`
+- `113.0ms` average end-to-end (with KV-cached `generate_v8b`)
+- `8.69 ms/token`
 - `100.0%` transcription accuracy
 
 ---
@@ -637,13 +557,13 @@ On the RTX 5090 test box, the current committed runtime path measured:
      h. output = Linear(attention)
      i. hidden = residual + output
      j. LayerNorm(hidden)
-     k. MLP: fc1 + GELU + fc2             [gelu_kernel + linear ops]
+     k. EncoderMLP: fc1 + GELU + fc2      [fused linear_gelu_kernel when FUSED=True]
      l. hidden = residual + MLP_output
    -> Tensor: (1, ~175, 1280)
    |
 5. Multi-Modal Projector
    -> Pool 4 frames: (1, ~44, 5120)
-   -> Linear + GELU: (1, ~44, 4096)
+   -> LinearGELU: (1, ~44, 4096)          [cuBLAS + gelu_kernel, fusion disabled]
    -> Linear: (1, ~44, 2048)
    |
 6. Embed input tokens (chat template + audio placeholders)
@@ -671,14 +591,11 @@ On the RTX 5090 test box, the current committed runtime path measured:
    -> Take last position: (1, 59264)
    |
 9. Autoregressive Decode (repeat for each new token)
-   With KV cache (generate_v8b):
+   With KV cache (generate_v8b — native in model.py):
      a. Embed new token: (1, 1, 2048)
      b. forward_with_kv_buffers: only 1 token through 28 layers
         (reads cached KV, appends new KV, computes attention over all cached keys)
      c. RMSNorm + LM Head -> next token logits
-   Without KV cache (original generate):
-     a. Concatenate new token embedding to full sequence
-     b. Re-run ENTIRE sequence through 28 layers (O(n^2))
    -> Generates ~13 tokens for test audio
    |
 10. Decode token IDs -> text
@@ -694,12 +611,16 @@ Each decode step processes only 1 token through the decoder.
 |--------|:------:|:-------:|:----------:|:---------:|:-----:|
 | layernorm_kernel | 64 | 0 | 0 | 0 | 64 |
 | rmsnorm_kernel | 0 | 56 | 56 | 728 | 784 |
-| gelu_kernel | 32 | 0 | 0 | 0 | 32 |
+| gelu_kernel | 33 | 0 | 0 | 0 | 33 |
 | silu_kernel | 0 | 28 | 28 | 364 | 392 |
 | linear (cuBLAS bf16) | ~160 | ~168 | ~168 | ~2184 | ~2512 |
 | SDPA (bf16, native GQA) | 32 | 28 | 28 | 364 | 424 |
 | compute_freqs | 1 | 1 | 0 | 0 | 2 |
 | softmax (standalone) | 0 | 1 | 1 | 13 | 14 |
+
+Note: gelu_kernel count includes 32 from encoder `EncoderMLP` (when fused, this
+becomes part of `linear_gelu_kernel` instead) + 1 from projector `LinearGELU`
+(unfused, so standalone gelu_kernel).
 
 **Key difference from no-KV-cache path:** With KV cache, each decode step's
 attention operates on a (1, heads, 1, head_dim) query against the growing
@@ -707,7 +628,3 @@ cached KV, instead of reprocessing the entire sequence. The compute per
 decode step is O(1) in sequence length (for everything except attention,
 which is O(n) for reading cached keys — but this is just reading, not
 recomputing through 28 layers).
-
-**Without KV cache (original generate):** Each of the 13 decode steps would
-reprocess the full growing sequence (80, 81, ..., 92 tokens) through all 28
-layers, resulting in ~4700+ kernel launches total and O(n^2) compute.

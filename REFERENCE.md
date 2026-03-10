@@ -18,6 +18,7 @@ Quick reference for kernel signatures, model architecture, and performance tunin
 | | RoPE | 50% partial (rotary_dim=32) |
 | **Projector** | Pool factor | 4 |
 | | Hidden | 5120 -> 4096 -> 2048 |
+| | Uses | LinearGELU + Linear |
 | **Text Decoder** | Hidden size | 2048 |
 | | Q heads | 16 |
 | | KV heads | 4 (GQA, 4:1 ratio) |
@@ -35,11 +36,11 @@ Quick reference for kernel signatures, model architecture, and performance tunin
 
 | File | Modifiable? | What's In It |
 |------|:-----------:|--------------|
-| `layers.py` | **Yes** | All 6 layer kernels + config knobs + fused kernels + KV-cache generate |
+| `layers.py` | **Yes** | All 6 layer kernels + config knobs + fused kernels + layer classes |
 | `attention.py` | **Yes** | 3 attention kernels + bf16 SDPA + native GQA |
 | `rope.py` | **Yes** | 1 RoPE kernel |
 | `__init__.py` | **Yes** | Backend/fusion configuration |
-| `model.py` | **No** | Model architecture, generation loop |
+| `model.py` | **No** | Model architecture, KV-cached generation (`generate_v8b`) |
 | `weight_loader.py` | **No** | HuggingFace weight loading |
 | `conv.py` | **No** | Conv1D for audio subsampling |
 
@@ -116,11 +117,11 @@ Encoder (32 layers):
   Reshape:           (1, 20, T/2, 64)      # 20 heads, head_dim=64
   RoPE:              Partial (first 32 dims rotated)
   Attention:         (1, 20, T/2, 64)      # Scaled dot-product
-  MLP:               (1, T/2, 1280) -> 5120 -> 1280  # GELU
+  MLP (EncoderMLP):  (1, T/2, 1280) -> 5120 -> 1280  # GELU (fused when FUSED=True)
 
 Encoder output:      (1, T/2, 1280)
 Pool 4 frames:       (1, T/8, 5120)        # Concatenate 4 consecutive frames
-Projector:           (1, T/8, 2048)        # 5120 -> 4096 (GELU) -> 2048
+Projector:           (1, T/8, 2048)        # LinearGELU(5120->4096) + Linear(4096->2048)
 
 Decoder input:       (1, N_tokens, 2048)   # Audio + text token embeddings
 Decoder (28 layers):
@@ -134,7 +135,7 @@ Decoder (28 layers):
 LM Head:             (1, N, 59264)         # Vocab logits
 Argmax:              next token ID
 
-KV-Cache Decode (generate_v8b):
+KV-Cache Decode (generate_v8b in model.py):
   Prefill:           Full sequence processed once, KV states cached
   Each decode step:  (1, 1, 2048) input -> only new token processed
   KV buffers:        Pre-allocated (batch, num_layers, heads, max_seq, head_dim)
@@ -152,7 +153,8 @@ layers.Linear.BACKEND = "triton"   # strict linear-kernel path
 
 # Fusion flags:
 layers.MLP.FUSED = True            # Fused SwiGLU (decoder MLP)
-layers.EncoderMLP.FUSED = True     # Fused Linear+GELU (has no effect with original model.py)
+layers.EncoderMLP.FUSED = True     # Fused Linear+GELU (encoder MLP — used by model.py)
+# LinearGELU.FUSED = False         # Disabled in layers.py (shared memory exceeds hardware limit)
 ```
 
 ### bfloat16 Weights
@@ -198,28 +200,25 @@ EncoderMLP.TILE_M, EncoderMLP.TILE_N, EncoderMLP.TILE_K = 64, 64, 32
 
 ---
 
-## KV-Cache Generate (`_generate_v8b` in layers.py)
+## KV-Cache Generation (in model.py — read-only)
 
-Monkey-patched onto `GlmAsrModel` at runtime via `_try_patch_model()`:
+`model.py` natively includes `generate_v8b()` which uses pre-allocated KV buffers:
 
 ```python
-# Called from Linear.__init__() — deferred because __init__.py doesn't run during benchmarks
-# Checks sys.modules for "model" module, attaches generate_v8b to GlmAsrModel
-
-def _generate_v8b(self, input_features, input_ids=None, ...):
-    audio_embeds = self.encode_audio(input_features, input_features_mask)
-    # ... build inputs_embeds (same logic as model.generate) ...
-    kv_buffers = self.text_decoder.allocate_kv_buffers(batch_size, prefill_len + max_new_tokens)
-    hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(inputs_embeds, kv_buffers, 0)
-    logits = self.lm_head(hidden)
-    # ... decode loop: each step passes only the new token ...
-    for _ in range(max_new_tokens):
-        new_embeds = self.text_decoder.embed_tokens(next_token)
-        hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(new_embeds, kv_buffers, cache_pos)
-        logits = self.lm_head(hidden)
+# model.py — GlmAsrModel.generate_v8b()
+inputs_embeds, seed_tokens = self._prepare_generation_inputs(...)
+kv_buffers = self.text_decoder.allocate_kv_buffers(batch_size, max_len)
+hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(inputs_embeds, kv_buffers, 0)
+logits = self.lm_head(hidden[:, -1:, :])
+for _ in range(max_new_tokens):
+    next_token = self._sample_next_token(logits[:, -1, :] / temperature, ...)
+    next_embeds = self.text_decoder.embed_tokens(next_token)
+    hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(next_embeds, kv_buffers, cache_pos)
+    logits = self.lm_head(hidden[:, -1:, :])
 ```
 
-`benchmark_student.py` checks `hasattr(model, 'generate_v8b')` and uses it when available.
+`generate()` delegates to `generate_v8b()` by default. `benchmark_student.py`
+also checks `hasattr(model, 'generate_v8b')` and uses it when available.
 
 ---
 
@@ -250,20 +249,9 @@ python benchmark_detailed.py glm_asr_triton_template
 
 | Implementation | Time | Speed | Accuracy |
 |----------------|------|-------|----------|
-| **Our template** | **128.7ms** | 9.9ms/tok | 100% |
+| **Our template** | **113.0ms** | 8.69ms/tok | 100% |
 | Example baseline | 261.3ms | 20.10ms/tok | 100% |
-| **Speedup** | **50.7%** | | |
-
-### Optimization Progression
-| Change | Time | Delta |
-|--------|------|-------|
-| Baseline (example) | 261.3ms | -- |
-| All kernels + cuBLAS + TF32 | 209.8ms | -51.5ms |
-| KV cache (generate_v8b) | 156ms | -53.8ms |
-| Micro-optimizations | 152ms | -4ms |
-| bfloat16 weights | 138ms | -14ms |
-| bfloat16 SDPA | 135ms | -3ms |
-| Native GQA | 128.7ms | -6.3ms |
+| **Speedup** | **56.7%** | | |
 
 ---
 
@@ -273,24 +261,25 @@ python benchmark_detailed.py glm_asr_triton_template
 - [x] Correct transcription output (100% word accuracy)
 - [x] Tile/block sizes tuned (tested multiple configs)
 - [x] Fused SwiGLU active for decoder MLP
+- [x] Fused EncoderMLP active for encoder layers
+- [x] LinearGELU fusion disabled (shared memory limit)
 - [x] Linear backend optimized (cuBLAS selected as fastest)
 - [x] TF32 runtime flags enabled in `__init__.py`
 - [x] GQA path optimized — native `enable_gqa=True` with bf16 inputs
 - [x] Activation block size 1024 (up from 256)
 - [x] bfloat16 weights — halves memory traffic for decode matmuls
 - [x] bfloat16 SDPA — enables Flash Attention / cuDNN backends
-- [x] KV-cache generation — O(n) decode via `generate_v8b` monkey-patch
-- [x] Total inference time < 200ms target (128.7ms achieved)
+- [x] KV-cache generation — O(n) decode via native `generate_v8b` in model.py
+- [x] Total inference time < 200ms target (113.0ms achieved)
+- [x] model.py, conv.py, weight_loader.py all match origin/ankush (zero diff)
 
 ---
 
 ## File Dependency Graph
 
 ```
-model.py (DO NOT MODIFY)
-  |-- layers.py (RMSNorm, LayerNorm, Linear, MLP, Embedding, softmax, gelu, silu)
-  |     |-- _generate_v8b (monkey-patched onto GlmAsrModel at runtime)
-  |     |-- _try_patch_model() (called from Linear.__init__)
+model.py (DO NOT MODIFY — includes generate_v8b with KV cache)
+  |-- layers.py (RMSNorm, LayerNorm, Linear, MLP, EncoderMLP, LinearGELU, Embedding, softmax, gelu, silu)
   |-- attention.py (MultiHeadAttention, scaled_dot_product_attention)
   |-- rope.py (RotaryEmbedding, apply_rotary_pos_emb)
   |-- conv.py (Conv1d, Conv1dSubsampler) (DO NOT MODIFY)
@@ -317,12 +306,6 @@ benchmark_student.py
 - **Expected output:** `CONCORD RETURNED TO ITS PLACE AMIDST THE TENTS`
 - **Sample rate:** 16kHz
 - **Duration:** ~3.5 seconds
-
-## Known Issues
-
-- **Duplicate GQA expansion in attention.py fallback** (lines 315-321): Two identical
-  `if use_gqa` blocks in the Triton/Torch fallback path. Does not affect the primary
-  SDPA path used during normal inference.
 
 ## Troubleshooting: cuBLAS
 

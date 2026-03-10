@@ -646,7 +646,6 @@ class Linear:
     BACKEND = "torch"  # Use cuBLAS (fastest for matmul on Blackwell)
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
-        _try_patch_model()
         self.in_features = in_features
         self.out_features = out_features
         self.has_bias = bias
@@ -864,7 +863,7 @@ def softmax(x: torch.Tensor, axis: int = -1) -> torch.Tensor:
 class LinearGELU:
     """Linear layer followed by GELU, with optional fused Triton path."""
 
-    FUSED = True
+    FUSED = False  # cuBLAS + separate GELU is faster and avoids shared memory limits
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
         self.linear = Linear(in_features, out_features, bias=bias)
@@ -1203,138 +1202,6 @@ class EncoderMLP:
 
         intermediate = intermediate.reshape(*orig_shape[:-1], self.intermediate_size)
         return self.fc2(intermediate)
-
-
-# ============================================================================
-# KV-cached generate — attached to GlmAsrModel lazily at first Linear init
-# ============================================================================
-
-def _generate_v8b(
-    self,
-    input_features,
-    input_ids=None,
-    input_features_mask=None,
-    attention_mask=None,
-    max_new_tokens: int = 256,
-    temperature: float = 1.0,
-    top_k: int = 50,
-    audio_pad_token_id: int = 59260,
-):
-    """Generate with KV cache using model's existing forward_with_kv_buffers."""
-    audio_embeds = self.encode_audio(input_features, input_features_mask)
-
-    if input_ids is not None:
-        batch_size = input_ids.shape[0]
-        if audio_embeds.ndim == 3:
-            audio_embeds = audio_embeds[0]
-        text_embeds = self.text_decoder.embed_tokens(input_ids)
-        audio_mask = input_ids == audio_pad_token_id
-        audio_positions = torch.where(audio_mask[0])[0]
-        if len(audio_positions) > 0:
-            first_pad = int(audio_positions[0].item())
-            last_pad = int(audio_positions[-1].item())
-            inputs_embeds = torch.cat(
-                [
-                    text_embeds[0, :first_pad, :][None],
-                    audio_embeds[None, :, :],
-                    text_embeds[0, last_pad + 1 :, :][None],
-                ],
-                dim=1,
-            )
-        else:
-            inputs_embeds = text_embeds
-        generated = input_ids.clone()
-    else:
-        batch_size = 1
-        if audio_embeds.ndim == 2:
-            audio_embeds = audio_embeds[None, :, :]
-        inputs_embeds = audio_embeds
-        generated = torch.full(
-            (batch_size, 1),
-            self.config.bos_token_id,
-            dtype=torch.int64,
-            device=inputs_embeds.device,
-        )
-
-    prefill_len = inputs_embeds.shape[1]
-    kv_buffers = self.text_decoder.allocate_kv_buffers(
-        batch_size, prefill_len + max_new_tokens
-    )
-
-    hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(
-        inputs_embeds, kv_buffers, 0
-    )
-    logits = self.lm_head(hidden)
-
-    finished = torch.zeros(batch_size, dtype=torch.bool, device=generated.device)
-    eos_ids = self.config.eos_token_id
-    if isinstance(eos_ids, int):
-        eos_ids = [eos_ids]
-    eos_t = torch.tensor(eos_ids, dtype=torch.int64, device=generated.device)
-
-    # Pre-allocate output buffer
-    gen_len = generated.shape[1]
-    out_buf = torch.empty(
-        (batch_size, gen_len + max_new_tokens),
-        dtype=torch.int64,
-        device=generated.device,
-    )
-    out_buf[:, :gen_len] = generated
-    num_generated = 0
-
-    for _ in range(max_new_tokens):
-        next_logits = logits[:, -1, :] / temperature
-
-        if top_k > 0 and top_k < next_logits.shape[-1]:
-            topk_idx = torch.argsort(next_logits, dim=-1)[:, -top_k:]
-            topk_logits = torch.gather(next_logits, -1, topk_idx)
-            shifted = topk_logits - topk_logits.max(dim=-1, keepdim=True).values
-            exp_l = torch.exp(shifted)
-            probs = exp_l / exp_l.sum(dim=-1, keepdim=True)
-            cum = torch.cumsum(probs, dim=-1)
-            sample = torch.rand((batch_size, 1), device=next_logits.device)
-            chosen = torch.argmax((cum >= sample).to(torch.float32), dim=-1)
-            next_token = torch.gather(topk_idx, -1, chosen[:, None])
-        else:
-            next_token = torch.argmax(next_logits, dim=-1, keepdim=True)
-
-        out_buf[:, gen_len + num_generated] = next_token.squeeze(-1)
-        num_generated += 1
-
-        tok_flat = next_token.flatten()
-        is_eos = torch.any(tok_flat[:, None] == eos_t[None, :], dim=1)
-        finished = finished | is_eos
-        if torch.all(finished):
-            break
-
-        new_embeds = self.text_decoder.embed_tokens(next_token)
-        hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(
-            new_embeds, kv_buffers, cache_pos
-        )
-        logits = self.lm_head(hidden)
-
-    return out_buf[:, : gen_len + num_generated]
-
-
-_MODEL_PATCHED = False
-
-
-def _try_patch_model():
-    """Attach generate_v8b to GlmAsrModel once it's available."""
-    global _MODEL_PATCHED
-    if _MODEL_PATCHED:
-        return
-    import sys
-
-    model_mod = sys.modules.get("model")
-    if model_mod is None:
-        return
-    cls = getattr(model_mod, "GlmAsrModel", None)
-    if cls is None:
-        return
-    if not hasattr(cls, "generate_v8b"):
-        cls.generate_v8b = _generate_v8b
-    _MODEL_PATCHED = True
 
 
 if __name__ == "__main__":
