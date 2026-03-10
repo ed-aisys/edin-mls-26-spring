@@ -83,68 +83,6 @@ def conv1d_matmul_kernel(
     )
 
 
-@triton.jit
-def conv1d_matmul_tiled_kernel(
-    col_ptr,
-    weight_ptr,
-    output_ptr,
-    M,
-    N,
-    K,
-    stride_col0,
-    stride_col1,
-    stride_col2,
-    stride_w0,
-    stride_w1,
-    stride_out0,
-    stride_out1,
-    stride_out2,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-):
-    """
-    Tiled conv1d matmul: output[b] = weight @ col[b].
-    Grid: (ceil(M/BLOCK_M) * ceil(N/BLOCK_N), batch)
-    """
-    pid_b = tl.program_id(1)
-    pid = tl.program_id(0)
-    num_n_tiles = tl.cdiv(N, BLOCK_N)
-    pid_m = pid // num_n_tiles
-    pid_n = pid % num_n_tiles
-
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-
-    for k_start in range(0, K, BLOCK_K):
-        offs_k = k_start + tl.arange(0, BLOCK_K)
-        w = tl.load(
-            weight_ptr + offs_m[:, None] * stride_w0 + offs_k[None, :] * stride_w1,
-            mask=(offs_m[:, None] < M) & (offs_k[None, :] < K),
-            other=0.0,
-        )
-        col = tl.load(
-            col_ptr
-            + pid_b * stride_col0
-            + offs_k[:, None] * stride_col1
-            + offs_n[None, :] * stride_col2,
-            mask=(offs_k[:, None] < K) & (offs_n[None, :] < N),
-            other=0.0,
-        )
-        acc += tl.dot(w, col)
-
-    tl.store(
-        output_ptr
-        + pid_b * stride_out0
-        + offs_m[:, None] * stride_out1
-        + offs_n[None, :] * stride_out2,
-        acc,
-        mask=(offs_m[:, None] < M) & (offs_n[None, :] < N),
-    )
-
-
 # ============================================================================
 # Conv1d Classes
 # ============================================================================
@@ -297,31 +235,6 @@ class Conv1d:
             )
 
             output = output_padded[:, : self.out_channels, : out_length].contiguous()
-        elif x.is_cuda:
-            if self.weight.device != x.device:
-                self.weight = self.weight.to(x.device)
-            col = col.contiguous()
-            M = self.out_channels
-            K = self.col_size
-            N = out_length
-            BLOCK_M = min(128, next_power_of_two(M))
-            BLOCK_N = min(128, next_power_of_two(N))
-            BLOCK_K = min(64, next_power_of_two(K))
-            output = torch.empty(
-                (batch, M, N), dtype=torch.float32, device=x.device
-            )
-            grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), batch)
-            conv1d_matmul_tiled_kernel[grid](
-                col,
-                self.weight,
-                output,
-                M, N, K,
-                col.stride(0), col.stride(1), col.stride(2),
-                self.weight.stride(0), self.weight.stride(1),
-                output.stride(0), output.stride(1), output.stride(2),
-                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                num_stages=1,
-            )
         else:
             if self.weight.device != x.device:
                 self.weight = self.weight.to(x.device)
