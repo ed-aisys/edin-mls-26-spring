@@ -295,18 +295,13 @@ def scaled_dot_product_attention(
     if scale is None:
         scale = 1.0 / np.sqrt(head_dim)
 
-    if use_gqa:
-        # PyTorch's `enable_gqa=True` path can be slower than explicitly expanded
-        # KV tensors on current CUDA backends. The expand+reshape stays cheap here.
-        k = _expand_kv_heads(k, num_heads)
-        v = _expand_kv_heads(v, num_heads)
-        use_gqa = False
-
     try:
+        # Use bfloat16 for SDPA to enable Flash Attention / cuDNN backends
+        sdpa_dtype = torch.bfloat16 if q.is_cuda else torch.float32
         output = F.scaled_dot_product_attention(
-            q.to(torch.float32),
-            k.to(torch.float32),
-            v.to(torch.float32),
+            q.to(sdpa_dtype),
+            k.to(sdpa_dtype),
+            v.to(sdpa_dtype),
             attn_mask=attention_mask,
             dropout_p=0.0,
             is_causal=is_causal,
@@ -316,6 +311,10 @@ def scaled_dot_product_attention(
         return output.to(q.dtype)
     except (RuntimeError, TypeError):
         pass
+
+    if use_gqa:
+        k = _expand_kv_heads(k, num_heads)
+        v = _expand_kv_heads(v, num_heads)
 
     if use_gqa:
         k = _expand_kv_heads(k, num_heads)

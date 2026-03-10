@@ -25,6 +25,7 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 
 layers.Linear.BACKEND = "torch"
+layers.Linear.BF16 = True
 layers.MLP.FUSED = True
 layers.EncoderMLP.FUSED = True
 

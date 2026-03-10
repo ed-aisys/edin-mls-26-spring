@@ -521,20 +521,18 @@ class RMSNorm:
         self.eps = eps
         self.weight = torch.ones(hidden_size, dtype=torch.float32)
         self.use_triton = _is_power_of_two(hidden_size)
+        self._block = next_power_of_two(hidden_size)
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        original_shape = x.shape
-
         if self.use_triton and x.is_cuda:
-            batch_size = int(np.prod(x.shape[:-1]))
-            x_flat = x.reshape(batch_size, self.hidden_size).contiguous()
-            x_flat = x_flat.to(torch.float32)
+            original_shape = x.shape
+            batch_size = x.numel() // self.hidden_size
+            x_flat = x.reshape(batch_size, self.hidden_size)
+            if x_flat.dtype != torch.float32:
+                x_flat = x_flat.to(torch.float32)
             output = torch.empty_like(x_flat)
-
             if self.weight.device != x.device:
                 self.weight = self.weight.to(x.device)
-
-            block = next_power_of_two(self.hidden_size)
             rmsnorm_kernel[(batch_size,)](
                 x_flat,
                 self.weight,
@@ -543,7 +541,7 @@ class RMSNorm:
                 output.stride(0),
                 self.hidden_size,
                 self.eps,
-                BLOCK_SIZE=block,
+                BLOCK_SIZE=self._block,
             )
             return output.reshape(original_shape)
 
@@ -564,22 +562,20 @@ class LayerNorm:
         self.weight = torch.ones(hidden_size, dtype=torch.float32)
         self.bias = torch.zeros(hidden_size, dtype=torch.float32)
         self.use_triton = _is_power_of_two(hidden_size)
+        self._block = next_power_of_two(hidden_size)
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        original_shape = x.shape
-
         if self.use_triton and x.is_cuda:
-            batch_size = int(np.prod(x.shape[:-1]))
-            x_flat = x.reshape(batch_size, self.hidden_size).contiguous()
-            x_flat = x_flat.to(torch.float32)
+            original_shape = x.shape
+            batch_size = x.numel() // self.hidden_size
+            x_flat = x.reshape(batch_size, self.hidden_size)
+            if x_flat.dtype != torch.float32:
+                x_flat = x_flat.to(torch.float32)
             output = torch.empty_like(x_flat)
-
             if self.weight.device != x.device:
                 self.weight = self.weight.to(x.device)
             if self.bias.device != x.device:
                 self.bias = self.bias.to(x.device)
-
-            block = next_power_of_two(self.hidden_size)
             layernorm_kernel[(batch_size,)](
                 x_flat,
                 self.weight,
@@ -589,7 +585,7 @@ class LayerNorm:
                 output.stride(0),
                 self.hidden_size,
                 self.eps,
-                BLOCK_SIZE=block,
+                BLOCK_SIZE=self._block,
             )
             return output.reshape(original_shape)
 
@@ -606,36 +602,30 @@ class LayerNorm:
 
 def gelu(x: torch.Tensor) -> torch.Tensor:
     """GELU activation using Triton."""
+    if not x.is_cuda:
+        return torch.nn.functional.gelu(x)
     original_shape = x.shape
-    total = int(np.prod(x.shape))
-    block = 1024  # Larger block for better GPU occupancy on RTX 5090
-
-    x_flat = x.reshape(-1).contiguous().to(torch.float32)
+    n = x.numel()
+    x_flat = x.reshape(-1)
+    if x_flat.dtype != torch.float32:
+        x_flat = x_flat.to(torch.float32)
     output = torch.empty_like(x_flat)
-    grid = (triton.cdiv(total, block),)
-
-    if x.is_cuda:
-        gelu_kernel[grid](x_flat, output, total, BLOCK_SIZE=block)
-        return output[:total].reshape(original_shape).to(x.dtype)
-
-    return torch.nn.functional.gelu(x)
+    gelu_kernel[(triton.cdiv(n, 1024),)](x_flat, output, n, BLOCK_SIZE=1024)
+    return output.reshape(original_shape)
 
 
 def silu(x: torch.Tensor) -> torch.Tensor:
     """SiLU activation using Triton."""
+    if not x.is_cuda:
+        return torch.nn.functional.silu(x)
     original_shape = x.shape
-    total = int(np.prod(x.shape))
-    block = 1024  # Larger block for better GPU occupancy on RTX 5090
-
-    x_flat = x.reshape(-1).contiguous().to(torch.float32)
+    n = x.numel()
+    x_flat = x.reshape(-1)
+    if x_flat.dtype != torch.float32:
+        x_flat = x_flat.to(torch.float32)
     output = torch.empty_like(x_flat)
-    grid = (triton.cdiv(total, block),)
-
-    if x.is_cuda:
-        silu_kernel[grid](x_flat, output, total, BLOCK_SIZE=block)
-        return output[:total].reshape(original_shape).to(x.dtype)
-
-    return torch.nn.functional.silu(x)
+    silu_kernel[(triton.cdiv(n, 1024),)](x_flat, output, n, BLOCK_SIZE=1024)
+    return output.reshape(original_shape)
 
 
 def get_activation(name: str):
@@ -656,6 +646,7 @@ class Linear:
     BACKEND = "torch"  # Use cuBLAS (fastest for matmul on Blackwell)
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
+        _try_patch_model()
         self.in_features = in_features
         self.out_features = out_features
         self.has_bias = bias
@@ -666,6 +657,8 @@ class Linear:
         self._weight_t_padded = None
         self._K_padded = None
         self._N_padded = None
+        self._weight_bf16 = None
+        self._bias_bf16 = None
 
     def _ensure_weight_prepared(self):
         """Cache transposed and padded weight for Triton kernel."""
@@ -697,22 +690,36 @@ class Linear:
             return self._forward_triton(x)
         return self._forward_torch(x)
 
+    BF16 = True  # Use bfloat16 weights (halves memory traffic for decode)
+
     def _forward_torch(self, x: torch.Tensor) -> torch.Tensor:
         """Torch matmul backend."""
         original_shape = x.shape
         batch_dims = original_shape[:-1]
 
-        M = int(np.prod(batch_dims))
-        x_2d = x.reshape(M, self.in_features).to(torch.float32)
+        M = x.numel() // self.in_features
+        x_2d = x.reshape(M, self.in_features)
 
         if self.weight.device != x.device:
             self.weight = self.weight.to(x.device)
+            if self._weight_bf16 is not None:
+                self._weight_bf16 = self._weight_bf16.to(x.device)
         bias = None
         if self.has_bias and self.bias_param is not None:
             if self.bias_param.device != x.device:
                 self.bias_param = self.bias_param.to(x.device)
+                self._bias_bf16 = None
             bias = self.bias_param
-        output = F.linear(x_2d, self.weight, bias)
+
+        if Linear.BF16:
+            if self._weight_bf16 is None:
+                self._weight_bf16 = self.weight.bfloat16()
+                self._bias_bf16 = bias.bfloat16() if bias is not None else None
+            output = F.linear(
+                x_2d.bfloat16(), self._weight_bf16, self._bias_bf16
+            ).float()
+        else:
+            output = F.linear(x_2d.to(torch.float32), self.weight, bias)
 
         return output.reshape(*batch_dims, self.out_features)
 
@@ -823,29 +830,30 @@ class Embedding:
 
 def softmax(x: torch.Tensor, axis: int = -1) -> torch.Tensor:
     """Softmax using Triton kernel."""
+    if not x.is_cuda:
+        return torch.softmax(x, dim=axis)
+
     if axis != -1 and axis != len(x.shape) - 1:
         x = torch.movedim(x, axis, -1)
 
     original_shape = x.shape
-    batch_size = int(np.prod(x.shape[:-1]))
     seq_len = x.shape[-1]
+    batch_size = x.numel() // seq_len
 
-    x_flat = x.reshape(batch_size, seq_len).to(torch.float32).contiguous()
+    x_flat = x.reshape(batch_size, seq_len)
+    if x_flat.dtype != torch.float32:
+        x_flat = x_flat.to(torch.float32)
     output = torch.empty_like(x_flat)
 
-    if x.is_cuda:
-        block = next_power_of_two(seq_len)
-        softmax_kernel[(batch_size,)](
-            x_flat,
-            output,
-            x_flat.stride(0),
-            output.stride(0),
-            seq_len,
-            BLOCK_SIZE=block,
-        )
-        result = output.reshape(original_shape)
-    else:
-        result = torch.softmax(x, dim=-1)
+    softmax_kernel[(batch_size,)](
+        x_flat,
+        output,
+        x_flat.stride(0),
+        output.stride(0),
+        seq_len,
+        BLOCK_SIZE=next_power_of_two(seq_len),
+    )
+    result = output.reshape(original_shape)
 
     if axis != -1 and axis != len(original_shape) - 1:
         result = torch.movedim(result, -1, axis)
@@ -1195,6 +1203,138 @@ class EncoderMLP:
 
         intermediate = intermediate.reshape(*orig_shape[:-1], self.intermediate_size)
         return self.fc2(intermediate)
+
+
+# ============================================================================
+# KV-cached generate — attached to GlmAsrModel lazily at first Linear init
+# ============================================================================
+
+def _generate_v8b(
+    self,
+    input_features,
+    input_ids=None,
+    input_features_mask=None,
+    attention_mask=None,
+    max_new_tokens: int = 256,
+    temperature: float = 1.0,
+    top_k: int = 50,
+    audio_pad_token_id: int = 59260,
+):
+    """Generate with KV cache using model's existing forward_with_kv_buffers."""
+    audio_embeds = self.encode_audio(input_features, input_features_mask)
+
+    if input_ids is not None:
+        batch_size = input_ids.shape[0]
+        if audio_embeds.ndim == 3:
+            audio_embeds = audio_embeds[0]
+        text_embeds = self.text_decoder.embed_tokens(input_ids)
+        audio_mask = input_ids == audio_pad_token_id
+        audio_positions = torch.where(audio_mask[0])[0]
+        if len(audio_positions) > 0:
+            first_pad = int(audio_positions[0].item())
+            last_pad = int(audio_positions[-1].item())
+            inputs_embeds = torch.cat(
+                [
+                    text_embeds[0, :first_pad, :][None],
+                    audio_embeds[None, :, :],
+                    text_embeds[0, last_pad + 1 :, :][None],
+                ],
+                dim=1,
+            )
+        else:
+            inputs_embeds = text_embeds
+        generated = input_ids.clone()
+    else:
+        batch_size = 1
+        if audio_embeds.ndim == 2:
+            audio_embeds = audio_embeds[None, :, :]
+        inputs_embeds = audio_embeds
+        generated = torch.full(
+            (batch_size, 1),
+            self.config.bos_token_id,
+            dtype=torch.int64,
+            device=inputs_embeds.device,
+        )
+
+    prefill_len = inputs_embeds.shape[1]
+    kv_buffers = self.text_decoder.allocate_kv_buffers(
+        batch_size, prefill_len + max_new_tokens
+    )
+
+    hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(
+        inputs_embeds, kv_buffers, 0
+    )
+    logits = self.lm_head(hidden)
+
+    finished = torch.zeros(batch_size, dtype=torch.bool, device=generated.device)
+    eos_ids = self.config.eos_token_id
+    if isinstance(eos_ids, int):
+        eos_ids = [eos_ids]
+    eos_t = torch.tensor(eos_ids, dtype=torch.int64, device=generated.device)
+
+    # Pre-allocate output buffer
+    gen_len = generated.shape[1]
+    out_buf = torch.empty(
+        (batch_size, gen_len + max_new_tokens),
+        dtype=torch.int64,
+        device=generated.device,
+    )
+    out_buf[:, :gen_len] = generated
+    num_generated = 0
+
+    for _ in range(max_new_tokens):
+        next_logits = logits[:, -1, :] / temperature
+
+        if top_k > 0 and top_k < next_logits.shape[-1]:
+            topk_idx = torch.argsort(next_logits, dim=-1)[:, -top_k:]
+            topk_logits = torch.gather(next_logits, -1, topk_idx)
+            shifted = topk_logits - topk_logits.max(dim=-1, keepdim=True).values
+            exp_l = torch.exp(shifted)
+            probs = exp_l / exp_l.sum(dim=-1, keepdim=True)
+            cum = torch.cumsum(probs, dim=-1)
+            sample = torch.rand((batch_size, 1), device=next_logits.device)
+            chosen = torch.argmax((cum >= sample).to(torch.float32), dim=-1)
+            next_token = torch.gather(topk_idx, -1, chosen[:, None])
+        else:
+            next_token = torch.argmax(next_logits, dim=-1, keepdim=True)
+
+        out_buf[:, gen_len + num_generated] = next_token.squeeze(-1)
+        num_generated += 1
+
+        tok_flat = next_token.flatten()
+        is_eos = torch.any(tok_flat[:, None] == eos_t[None, :], dim=1)
+        finished = finished | is_eos
+        if torch.all(finished):
+            break
+
+        new_embeds = self.text_decoder.embed_tokens(next_token)
+        hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(
+            new_embeds, kv_buffers, cache_pos
+        )
+        logits = self.lm_head(hidden)
+
+    return out_buf[:, : gen_len + num_generated]
+
+
+_MODEL_PATCHED = False
+
+
+def _try_patch_model():
+    """Attach generate_v8b to GlmAsrModel once it's available."""
+    global _MODEL_PATCHED
+    if _MODEL_PATCHED:
+        return
+    import sys
+
+    model_mod = sys.modules.get("model")
+    if model_mod is None:
+        return
+    cls = getattr(model_mod, "GlmAsrModel", None)
+    if cls is None:
+        return
+    if not hasattr(cls, "generate_v8b"):
+        cls.generate_v8b = _generate_v8b
+    _MODEL_PATCHED = True
 
 
 if __name__ == "__main__":
