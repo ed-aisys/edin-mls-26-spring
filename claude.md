@@ -1,10 +1,11 @@
 # Claude Development Log
 
 ## Project: GLM-ASR Triton GPU Kernel Implementation
-**Date:** 2026-03-09
-**Branch:** `dev/complete-and-optimize`
+**Date:** 2026-03-09 to 2026-03-10
+**Branch:** `dev/complete-and-optimize` -> `ankush`
 **GPU:** NVIDIA GeForce RTX 5090 (Blackwell, sm_120, 32GB VRAM)
-**CUDA Toolkit:** 13.1 | **Driver:** 580.126.09
+**CUDA Toolkit:** 13.0 | **Driver:** 580.126.20
+**PyTorch:** 2.10.0+cu130 | **Triton:** 3.6.0
 
 ---
 
@@ -14,164 +15,166 @@ Completed all 10 Triton kernel implementations for the GLM-ASR speech-to-text mo
 The project is a University of Edinburgh MLS course assignment implementing GPU kernels
 for a multi-modal transformer (audio encoder + text decoder).
 
+**Final benchmark result: 214ms average, 100% transcription accuracy, 18% faster than baseline.**
+
+---
+
+## Important Constraints (from GUIDE.md)
+
+**Do NOT modify these files:**
+- `model.py` — model architecture and generation loop
+- `weight_loader.py` — loads pre-trained weights from HuggingFace
+- `conv.py` — 1D convolution for audio subsampling
+
+**Files we CAN modify:**
+- `layers.py` — kernel implementations + layer classes + config knobs
+- `attention.py` — attention kernels
+- `rope.py` — RoPE kernel
+- `__init__.py` — backend/fusion configuration
+
 ---
 
 ## Step-by-Step Development Log
 
-### Step 1: Environment Assessment
-- **CUDA 13.1** installed (compatible with 13.0 requirement)
-- **RTX 5090** GPU detected (Blackwell architecture, compute capability 12.0)
-- **PyTorch 2.10.0+cu130** initially installed
-- **Triton 3.6.0** available
-- **Issue:** CUDA runtime error 804 (forward compatibility not supported) prevents GPU execution in this container. The CUDA Driver API (cuInit) works, but the CUDA Runtime API (cudaGetDeviceCount) fails due to kernel module version mismatch (driver 580 vs toolkit compat library 590).
-- **Workaround attempted:** Tried cu128, cu130, LD_PRELOAD compat library - all fail at cudart level.
-- **Resolution:** Code runs correctly on CPU fallback; all kernels validated. GPU execution requires matching driver version.
+### Step 1: Environment Assessment (Session 1, 2026-03-09)
+- Initial container had CUDA 13.1 toolkit but driver 580.126.09
+- CUDA runtime error 804 (forward compatibility not supported on consumer GPUs)
+- Installed PyTorch cu128 as workaround, then later restored cu130
+- Code validated on CPU fallback (13.8s, 100% accuracy)
 
 ### Step 2: Codebase Analysis
-Analyzed full project structure:
-- `hw1-asr/glm_asr_triton_template/` - Student template (10 TODO kernels)
-- `hw1-asr/glm_asr_triton_example/` - Reference implementation (complete)
-- `hw1-asr/glm_asr_scratch/` - PyTorch CPU baseline
-- Model: GLM-ASR-Nano (32-layer audio encoder + 28-layer text decoder)
+- `hw1-asr/glm_asr_triton_template/` — Student template (10 TODO kernels)
+- `hw1-asr/glm_asr_triton_example/` — Reference implementation (complete)
+- Model: GLM-ASR-Nano-2512 (32-layer audio encoder + 28-layer text decoder)
 
-### Step 3: Kernel Implementations
+### Step 3: Kernel Implementations (all in allowed files)
 
-#### 3.1 `layers.py` - 6 kernels completed
+#### 3.1 `layers.py` — 6 kernels
 
-**rmsnorm_kernel** (line ~61-73)
-```
-RMSNorm: x / sqrt(mean(x^2) + eps) * weight
+**rmsnorm_kernel**: `y = x / sqrt(mean(x^2) + eps) * weight`
 - Load row, compute sum of squares, normalize, apply weight
-- Grid: (batch_size,), one thread block per row
-```
+- Grid: (num_rows,), one block per row
 
-**layernorm_kernel** (line ~95-107)
-```
-LayerNorm: (x - mean) / sqrt(var + eps) * weight + bias
-- Compute mean, center data, compute variance, normalize, apply affine
-- Grid: (batch_size,), one thread block per row
-```
+**layernorm_kernel**: `y = (x - mean) / sqrt(var + eps) * weight + bias`
+- Two-pass: compute mean, center, compute variance, normalize, affine transform
+- Grid: (num_rows,), one block per row
 
-**gelu_kernel** (line ~117-128)
-```
-GELU: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715*x^3)))
-- Element-wise activation with tanh approximation
-- Grid: (ceil(n_elements / BLOCK_SIZE),)
-```
+**gelu_kernel**: `y = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715*x^3)))`
+- Element-wise activation with tanh approximation via `tl.extra.cuda.libdevice.tanh`
+- Grid: (ceil(n_elements / BLOCK_SIZE),), BLOCK_SIZE=1024
 
-**silu_kernel** (line ~139-147)
-```
-SiLU: x * sigmoid(x) = x / (1 + exp(-x))
+**silu_kernel**: `y = x * sigmoid(x) = x / (1 + exp(-x))`
 - Element-wise activation
-- Grid: (ceil(n_elements / BLOCK_SIZE),)
-```
+- Grid: (ceil(n_elements / BLOCK_SIZE),), BLOCK_SIZE=1024
 
-**linear_kernel_tf32** (line ~179-207)
-```
-Tiled matmul: C = A @ B
-- 2D tiling with BLOCK_M x BLOCK_N output tiles
-- Accumulates over K dimension in BLOCK_K chunks
-- Uses tl.dot for tensor core acceleration
-- Grid: (M // BLOCK_M, N // BLOCK_N)
-```
+**linear_kernel_tf32**: `C = A @ B` (tiled matmul)
+- 2D tiling: BLOCK_M x BLOCK_N output tiles, accumulate over K in BLOCK_K chunks
+- `tl.dot(a, b)` for tensor core acceleration
+- Grid: (ceil(M/BLOCK_M), ceil(N/BLOCK_N))
 
-**softmax_kernel** (line ~342-352)
-```
-Softmax: exp(x - max(x)) / sum(exp(x - max(x)))
-- Numerically stable: subtract max before exp
-- Grid: (batch_size,), one thread block per row
-```
+**softmax_kernel**: `y = exp(x - max(x)) / sum(exp(x - max(x)))`
+- Numerically stable: subtract max before exp to prevent overflow
+- Grid: (num_rows,), one block per row
 
-#### 3.2 `attention.py` - 3 kernels completed
+#### 3.2 `attention.py` — 3 kernels
 
-**attention_scores_kernel** (line ~53-85)
-```
-Q @ K^T * scale for single query position
-- Load query vector, load all keys, dot product + scale
+**attention_scores_kernel**: `scores = sum(K * Q[broadcast], dim=-1) * scale`
+- Loads Q vector and K matrix, broadcast-multiply and reduce
 - Grid: (batch_heads, seq_q)
-```
 
-**softmax_inplace_kernel** (line ~70-87)
-```
-In-place softmax along seq_k dimension
-- Same algorithm as softmax_kernel but writes back to input
+**softmax_inplace_kernel**: In-place numerically stable softmax
+- Same as softmax_kernel but writes back to input buffer
 - Grid: (batch_heads * seq_q,)
-```
 
-**attention_output_kernel** (line ~113-142)
-```
-attn_weights @ V weighted sum
-- Load attention weights, load values, weighted sum
+**attention_output_kernel**: `output = sum(V * weights[:, None], dim=0)`
+- Weighted sum of value vectors by attention weights
 - Grid: (batch_heads, seq_q)
-```
 
-#### 3.3 `rope.py` - 1 kernel completed
+#### 3.3 `rope.py` — 1 kernel
 
-**compute_freqs_kernel** (line ~50-82)
-```
-RoPE frequency computation: cos/sin(position * inv_freq)
-- Load position scalar, load inverse frequencies
-- Compute freqs, store concatenated cos/sin (first half = second half)
+**compute_freqs_kernel**: `cos/sin(position * inv_freq)` precomputation
+- Load position scalar and inverse frequency vector
+- Store concatenated cos/sin (duplicated into both halves)
 - Grid: (seq_len,)
+
+### Step 4: Performance Optimizations (in allowed files only)
+
+#### 4.1 Linear Backend Selection
+```python
+# __init__.py and layers.py
+Linear.BACKEND = "torch"  # cuBLAS — fastest for Blackwell RTX 5090
 ```
+Tested both `"triton"` and `"torch"` backends. cuBLAS is slightly faster (~214ms vs ~226ms).
 
-### Step 4: Unit Test Verification
-All tests pass on CPU:
+#### 4.2 Linear Tile Sizes
+```python
+Linear.TILE_M = 128  # Larger tiles for better GPU occupancy
+Linear.TILE_N = 128
+Linear.TILE_K = 64
 ```
-python layers.py     -> All Triton layers working!
-python attention.py  -> Triton Attention working!
-python rope.py       -> Triton RoPE working!
+These are used when BACKEND="triton" and for the fused kernels.
+
+#### 4.3 Kernel Fusion (pre-implemented, enabled via config)
+```python
+MLP.FUSED = True         # Fused SwiGLU: SiLU(x @ gate) * (x @ up) in one kernel
+EncoderMLP.FUSED = True  # Fused Linear+GELU in one kernel
 ```
+Note: `EncoderMLP.FUSED` is set but the original `model.py` doesn't use `EncoderMLP`
+(it uses separate `fc1`/`fc2` + `gelu()` calls). This setting is harmless but has no
+effect with the unmodified model.py.
 
-### Step 5: Performance Optimizations Applied
+#### 4.4 Activation Block Sizes
+- GELU/SiLU block size: 1024 (up from default 256) for better GPU occupancy
 
-#### 5.1 Activation Kernel Block Size (layers.py)
-- GELU/SiLU block size: 256 -> 1024 (better GPU occupancy on RTX 5090)
+### Step 5: Environment Fixes (Session 2, 2026-03-10)
 
-#### 5.2 Matmul Tile Sizes
-- Linear: TILE_M=64, TILE_N=64, TILE_K=32 (default baseline)
-- For RTX 5090 Blackwell: TILE_M=128, TILE_N=128, TILE_K=64 recommended
-  (larger tiles to utilize larger L2 cache and tensor cores)
+#### 5.1 New Pod with CUDA 13.0
+- Driver 580.126.20 + CUDA toolkit 13.0 = matching versions
+- `torch.cuda.is_available()` returns True
+- RTX 5090 detected and working
 
-#### 5.3 Kernel Fusion (pre-implemented)
-- `linear_gelu_kernel`: Fused Linear+GELU (eliminates intermediate memory write)
-- `swiglu_fused_kernel`: Fused SwiGLU = SiLU(x @ gate) * (x @ up)
-- Both fusions are enabled by default (`MLP.FUSED = True`, `EncoderMLP.FUSED = True`)
+#### 5.2 cuBLAS Version Mismatch Fix
+- pip-installed `nvidia-cublas 13.1.0.3` conflicted with system cuBLAS 13.0
+- cuBLAS loaded 13.1 from pip but cuBLASLt loaded 13.0 from system
+- **Fix:** `pip uninstall nvidia-cublas` — torch falls back to system cuBLAS 13.0
+- `torch.matmul` works correctly after this fix
 
-#### 5.4 KV Cache (model.py)
-- `generate_v8b` with pre-allocated KV buffers (avoids tensor concatenation)
-- Allocate once, write at cache_pos offset during generation
-
-#### 5.5 2026-03-10 Inference Path Fixes
-- Implemented the actual `generate_v8b` method in `glm_asr_triton_template/model.py`
-  so `benchmark_student.py` now picks the cached path automatically.
-- Prefill now runs once, then decode steps reuse pre-allocated KV buffers and only
-  apply the LM head to the newest token instead of the full prompt on every step.
-- Decoder RoPE cos/sin are now computed once per decoder pass and reused across all
-  layers for both prefill and single-token decode.
-- `attention.py` now prefers PyTorch SDPA (`scaled_dot_product_attention`) with
-  `enable_gqa=True` and falls back to the Triton/Torch implementation if SDPA
-  is unavailable on the runtime.
-- `layers.py` keeps `Linear.BACKEND = "triton"` in this container so cuBLAS stays
-  bypassed. This is intentional: cuBLAS GEMM calls in this container were not
-  reliable during testing, so the benchmarked linear path does not use cuBLAS.
-  Fused MLP kernels only run when the batch-row count is large enough to justify
-  a Triton launch.
-
-#### 5.6 2026-03-10 Fused MLP Follow-up
-- Audio encoder layers now use `EncoderMLP` for their GELU MLP path, which finally
-  activates the existing `linear_gelu_kernel` across all 32 encoder blocks.
-- The projector now uses a fused `LinearGELU` helper for `linear_1 + GELU` before
-  the final projection.
-- `generate_v8b` now treats `top_k=1` as greedy `argmax` instead of sorting the
-  whole vocabulary for a degenerate top-k sample.
-- Fixed two dormant fused-kernel issues uncovered by these changes:
-  - `linear_gelu_kernel` now uses `tl.extra.cuda.libdevice.tanh`
-  - encoder fused GELU now applies `fc1` bias before GELU, not after
+#### 5.3 Restricted Files Reverted
+- Discovered GUIDE.md rule: model.py, weight_loader.py, conv.py must NOT be modified
+- Previous session had modified model.py (KV cache, generate_v8b, EncoderMLP, shared RoPE)
+  and conv.py (tiled kernel for broken cuBLAS workaround)
+- Reverted both to their original versions from the base commit (4da607d)
 
 ---
 
-## Architecture Overview (Actual Nano Config)
+## Benchmark Results
+
+### Our Implementation (`glm_asr_triton_template`)
+| Metric | Value |
+|--------|-------|
+| **Average time** | **214.3ms** (+/- 0.4ms) |
+| **Tokens** | 13 |
+| **Speed** | 16.49 ms/token |
+| **Accuracy** | 100.0% |
+| **Transcription** | "Concord returned to its place amidst the tents." |
+
+### Example Baseline (`glm_asr_triton_example`)
+| Metric | Value |
+|--------|-------|
+| **Average time** | 261.3ms (+/- 0.5ms) |
+| **Tokens** | 13 |
+| **Speed** | 20.10 ms/token |
+| **Accuracy** | 100.0% |
+
+### Comparison
+- **18% faster** than the example baseline (214ms vs 261ms)
+- Sub-200ms would require KV cache in model.py (which we cannot modify)
+- The original model.py `generate()` re-runs the full sequence through all 28 decoder
+  layers for each new token — no KV cache, O(n^2) decode cost
+
+---
+
+## Architecture Overview (GLM-ASR-Nano-2512)
 
 ```
 Audio (WAV 16kHz)
@@ -184,79 +187,62 @@ Audio (WAV 16kHz)
   -> Text Output
 ```
 
-**Note:** The HF config for `zai-org/GLM-ASR-Nano-2512` uses smaller dims than the full model.
+---
 
 ## Key Files
 
-| File | Purpose |
-|------|---------|
-| `glm_asr_triton_template/layers.py` | All layer kernels (6 implemented) |
-| `glm_asr_triton_template/attention.py` | Attention kernels (3 implemented) |
-| `glm_asr_triton_template/rope.py` | RoPE kernel (1 implemented) |
-| `glm_asr_triton_template/model.py` | Full model architecture + cached generation path |
-| `glm_asr_triton_template/conv.py` | Conv1D layers (unchanged) |
-| `glm_asr_triton_template/weight_loader.py` | HuggingFace weight loading (unchanged) |
-| `benchmark_student.py` | End-to-end benchmark script |
-| `benchmark_detailed.py` | Per-operator profiling |
+| File | Purpose | Modifiable? |
+|------|---------|:-----------:|
+| `glm_asr_triton_template/layers.py` | Layer kernels (6 implemented) + config | Yes |
+| `glm_asr_triton_template/attention.py` | Attention kernels (3 implemented) | Yes |
+| `glm_asr_triton_template/rope.py` | RoPE kernel (1 implemented) | Yes |
+| `glm_asr_triton_template/__init__.py` | Backend/fusion configuration | Yes |
+| `glm_asr_triton_template/model.py` | Model architecture + generation loop | **No** |
+| `glm_asr_triton_template/conv.py` | Conv1D layers | **No** |
+| `glm_asr_triton_template/weight_loader.py` | HuggingFace weight loading | **No** |
+| `benchmark_student.py` | End-to-end benchmark | N/A |
+
+---
 
 ## Running the Benchmark
 
 ```bash
 cd hw1-asr
-# IMPORTANT: Set HF_HOME to workspace for sufficient disk space
+
+# IMPORTANT: Set HF_HOME if overlay disk space is limited (<5GB free)
 export HF_HOME=/workspace/.hf_cache
 
-# Test the template implementation
-python benchmark_student.py glm_asr_triton_template
+# Test your implementation
+python benchmark_student.py glm_asr_triton_template --warmup 1 --runs 3
 
-# Test the reference example
-python benchmark_student.py glm_asr_triton_example
+# Compare against baseline
+python benchmark_student.py glm_asr_triton_example --warmup 1 --runs 3
 
 # Detailed per-operator profiling
 python benchmark_detailed.py glm_asr_triton_template
 ```
 
-## Benchmark Results (CPU Mode)
-
-Model loaded and validated on CPU (CUDA unavailable due to driver mismatch):
-- **Transcription:** "Concord returned to its place amidst the tents."
-- **Accuracy:** 100% (all 8 expected words matched)
-- **Tokens generated:** 13
-- **CPU time:** ~13.8s (will be ~200ms on GPU with optimizations)
-- **Generate function used at the time:** `generate` (this log predated the
-  `generate_v8b` implementation in the current code)
-
-## Benchmark Status After 2026-03-10 Changes
-
-Fresh GPU benchmark on **2026-03-10** for `glm_asr_triton_template`:
-- **Time:** `185.3 ms` (`+/- 0.6 ms`) over 3 runs
-- **Tokens:** `13`
-- **Speed:** `14.25 ms/token`
-- **Accuracy:** `100.0%`
-
-This improved on the user-reported earlier benchmark of **188 ms** while keeping
-the transcription correct.
-
-## GPU Environment Issue
-
-The container has a driver version mismatch preventing CUDA runtime initialization:
-- **nvidia-smi works** (uses NVML, independent of CUDA runtime)
-- **CUDA Driver API works** (cuInit succeeds from libcuda.so.580)
-- **CUDA Runtime API fails** (cudaGetDeviceCount returns error 804)
-- **Root cause:** The CUDA runtime's forward compatibility check fails because the kernel module (driver 580.126.09) doesn't support the forward compat path required by the CUDA toolkit (13.1)
-
-**To fix:** Match the NVIDIA driver version with the CUDA toolkit version, or use a container image with pre-matched driver/toolkit.
-
 ---
 
 ## Disk Space Notes
 
-The overlay filesystem only has ~10GB total (3-4GB free). The model is 4.3GB.
+The overlay filesystem only has ~10GB total. The model is 4.3GB.
 **Solution:** Set `HF_HOME=/workspace/.hf_cache` to use the workspace mount (2+ PB).
-Also removed unused NVIDIA cu13 duplicate packages to free overlay space.
+
+If cuBLAS fails with `CUBLAS_STATUS_INVALID_VALUE`, check for pip-installed NVIDIA
+packages that conflict with the system CUDA libraries:
+```bash
+pip list | grep nvidia-cublas  # Should match system CUDA version
+pip uninstall nvidia-cublas    # Remove if version mismatches
+```
+
+---
 
 ## Commits
 
-1. `12daf13` - feat: implement all 10 Triton GPU kernels for ASR model
-2. docs: add claude.md, tutorial, reference, and code explanation
-3. fix: verify end-to-end correctness (100% accuracy on test audio)
+1. `12daf13` — feat: implement all 10 Triton GPU kernels for ASR model
+2. `5e8b191` — docs: add full documentation and optimize kernel tile sizes
+3. `01fc806` — docs: update claude.md with benchmark results and correct model config
+4. `714cdc9` — fix: revert model.py and conv.py to originals (do-not-modify files)
+5. `bdc7690` — perf: switch to cuBLAS backend and tune tile sizes (214ms, 18% faster)
+6. (this commit) — docs: update all documentation with final results and accurate info

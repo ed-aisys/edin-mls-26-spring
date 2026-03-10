@@ -31,6 +31,14 @@ pip install torch triton numpy transformers datasets huggingface_hub safetensors
 python -c "import torch; print('CUDA:', torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
 
+### Verify the baseline works FIRST
+```bash
+cd hw1-asr
+./benchmark.sh glm_asr_triton_example
+```
+You should see `Accuracy: 100.0%` and `Status: PASS`. If this fails, fix your
+environment before writing any code.
+
 ---
 
 ## 2. Understanding the Project Structure
@@ -41,15 +49,18 @@ hw1-asr/
     layers.py                  <- 6 kernels to implement
     attention.py               <- 3 kernels to implement
     rope.py                    <- 1 kernel to implement
-    model.py                   <- Complete (don't modify)
-    conv.py                    <- Complete (don't modify)
-    weight_loader.py           <- Complete (don't modify)
+    __init__.py                <- Configuration (backend, fusion flags)
+    model.py                   <- DO NOT MODIFY
+    conv.py                    <- DO NOT MODIFY
+    weight_loader.py           <- DO NOT MODIFY
 
   glm_asr_triton_example/      <- REFERENCE (study this)
     layers.py                  <- Working implementations
     attention.py               <- Working implementations
     rope.py                    <- Working implementations
 ```
+
+**Important:** Per GUIDE.md, you must NOT modify `model.py`, `weight_loader.py`, or `conv.py`.
 
 ---
 
@@ -80,69 +91,40 @@ def my_kernel(input_ptr, output_ptr, N, BLOCK_SIZE: tl.constexpr):
 ```
 
 Key concepts:
-- `tl.program_id(axis)` - Which block am I? (like CUDA blockIdx)
-- `tl.arange(0, N)` - Vector of [0, 1, ..., N-1] (like threadIdx)
-- `tl.load/tl.store` - Memory access with mask for bounds checking
-- `tl.constexpr` - Compile-time constant (determines block shape)
+- `tl.program_id(axis)` — Which block am I? (like CUDA blockIdx)
+- `tl.arange(0, N)` — Vector of [0, 1, ..., N-1] (like threadIdx)
+- `tl.load/tl.store` — Memory access with mask for bounds checking
+- `tl.constexpr` — Compile-time constant (determines block shape)
 
 ---
 
-## 4. Implementing Each Kernel
+## 4. Implementing Each Kernel (Recommended Order)
 
-### 4.1 RMSNorm Kernel
+### Phase 1: Element-wise Operations
 
-**What it does:** Root Mean Square Normalization
+#### 4.1 SiLU Kernel (simplest — start here)
+
+**What it does:** Sigmoid Linear Unit / Swish activation
 ```
-y = x / sqrt(mean(x^2) + eps) * weight
+y = x * sigmoid(x) = x / (1 + exp(-x))
 ```
 
-**Implementation steps:**
 ```python
 @triton.jit
-def rmsnorm_kernel(x_ptr, w_ptr, y_ptr, stride_x, stride_y,
-                   hidden_size, eps, BLOCK_SIZE: tl.constexpr):
-    pid = tl.program_id(0)  # Which row
-    offs = tl.arange(0, BLOCK_SIZE)
-    mask = offs < hidden_size
+def silu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < n_elements
 
-    # Load one row of input
-    x = tl.load(x_ptr + pid * stride_x + offs, mask=mask, other=0.0)
-    x = x.to(tl.float32)
-
-    # Compute variance = mean(x^2)
-    var = tl.sum(x * x, axis=0) / hidden_size
-
-    # Normalize
-    x_norm = x * tl.rsqrt(var + eps)
-
-    # Apply weight
-    w = tl.load(w_ptr + offs, mask=mask, other=0.0)
-    y = x_norm * w
-    tl.store(y_ptr + pid * stride_y + offs, y, mask=mask)
+    x = tl.load(x_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+    sigmoid = 1.0 / (1.0 + tl.exp(-x))
+    y = x * sigmoid
+    tl.store(y_ptr + offs, y, mask=mask)
 ```
 
-**Grid:** `(batch_size,)` - one block per input row.
+**Grid:** `(ceil(n_elements / BLOCK_SIZE),)` — element-wise, one block per chunk.
 
-### 4.2 LayerNorm Kernel
-
-**What it does:** Layer Normalization
-```
-y = (x - mean(x)) / sqrt(var(x) + eps) * weight + bias
-```
-
-**Key difference from RMSNorm:** Subtract mean first, then compute variance of centered data.
-
-```python
-# After loading x:
-mean = tl.sum(x, axis=0) / hidden_size
-x_centered = x - mean
-var = tl.sum(x_centered * x_centered, axis=0) / hidden_size
-x_norm = x_centered * tl.rsqrt(var + eps)
-# Then apply weight AND bias:
-y = x_norm * w + b
-```
-
-### 4.3 GELU Kernel
+#### 4.2 GELU Kernel
 
 **What it does:** Gaussian Error Linear Unit (tanh approximation)
 ```
@@ -156,25 +138,84 @@ inner = sqrt_2_over_pi * (x + 0.044715 * x3)
 y = x * 0.5 * (1.0 + tl.extra.cuda.libdevice.tanh(inner))
 ```
 
-**Grid:** `(ceil(n_elements / BLOCK_SIZE),)` - element-wise operation.
+**Grid:** `(ceil(n_elements / BLOCK_SIZE),)` — same pattern as SiLU.
 
-### 4.4 SiLU Kernel
+### Phase 2: Reductions
 
-**What it does:** Sigmoid Linear Unit / Swish
+#### 4.3 RMSNorm Kernel
+
+**What it does:** Root Mean Square Normalization (text decoder)
 ```
-y = x * sigmoid(x) = x / (1 + exp(-x))
+y = x / sqrt(mean(x^2) + eps) * weight
 ```
 
 ```python
-sigmoid = 1.0 / (1.0 + tl.exp(-x))
-y = x * sigmoid
+@triton.jit
+def rmsnorm_kernel(x_ptr, w_ptr, y_ptr, stride_x, stride_y,
+                   hidden_size, eps, BLOCK_SIZE: tl.constexpr):
+    pid = tl.program_id(0)  # Which row
+    offs = tl.arange(0, BLOCK_SIZE)
+    mask = offs < hidden_size
+
+    # Load one row
+    x = tl.load(x_ptr + pid * stride_x + offs, mask=mask, other=0.0)
+    x = x.to(tl.float32)
+
+    # Compute RMS
+    var = tl.sum(x * x, axis=0) / hidden_size
+    x_norm = x * tl.rsqrt(var + eps)
+
+    # Apply weight
+    w = tl.load(w_ptr + offs, mask=mask, other=0.0)
+    y = x_norm * w
+    tl.store(y_ptr + pid * stride_y + offs, y, mask=mask)
 ```
 
-### 4.5 Linear (Matmul) Kernel
+**Grid:** `(num_rows,)` — one block per row.
 
-**What it does:** Tiled matrix multiplication C = A @ B
+#### 4.4 LayerNorm Kernel
 
-This is the most complex kernel. It uses 2D tiling:
+**What it does:** Layer Normalization (audio encoder)
+```
+y = (x - mean(x)) / sqrt(var(x) + eps) * weight + bias
+```
+
+**Key difference from RMSNorm:** Subtract mean first, then compute variance.
+Also applies bias in addition to weight.
+
+```python
+mean = tl.sum(x, axis=0) / hidden_size
+x_centered = x - mean
+var = tl.sum(x_centered * x_centered, axis=0) / hidden_size
+x_norm = x_centered * tl.rsqrt(var + eps)
+y = x_norm * w + b  # Note: includes bias
+```
+
+#### 4.5 Softmax Kernel
+
+**What it does:** Numerically stable softmax
+```
+y = exp(x - max(x)) / sum(exp(x - max(x)))
+```
+
+```python
+x = tl.load(x_ptr + row * stride_x + offs, mask=mask, other=-float("inf"))
+x = x - tl.max(x, axis=0)       # Subtract max for stability
+exp_x = tl.exp(x)
+denom = tl.sum(exp_x, axis=0)
+y = exp_x / denom
+```
+
+**Why subtract max?** Without this, `exp(1000)` overflows to infinity.
+
+### Phase 3: Tiled Matrix Multiplication
+
+#### 4.6 Linear (Matmul) Kernel
+
+**What it does:** `C = A @ B` using 2D tiled algorithm
+
+This is the most complex kernel. It divides the output matrix into tiles and
+accumulates each tile's result by iterating over the K dimension:
 
 ```python
 @triton.jit
@@ -183,18 +224,15 @@ def linear_kernel_tf32(a_ptr, b_ptr, c_ptr, M, N, K,
                        stride_cm, stride_cn,
                        BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
                        BLOCK_K: tl.constexpr):
-    pid_m = tl.program_id(0)  # Row tile index
-    pid_n = tl.program_id(1)  # Column tile index
+    pid_m = tl.program_id(0)  # Row tile
+    pid_n = tl.program_id(1)  # Column tile
 
-    # Offset ranges for this tile
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     offs_k = tl.arange(0, BLOCK_K)
 
-    # Initialize accumulator
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-    # Loop over K dimension
     for k in range(0, K, BLOCK_K):
         a = tl.load(a_ptr + offs_m[:, None] * stride_am +
                      (k + offs_k[None, :]) * stride_ak,
@@ -206,62 +244,35 @@ def linear_kernel_tf32(a_ptr, b_ptr, c_ptr, M, N, K,
                      other=0.0)
         acc += tl.dot(a, b)  # Uses tensor cores!
 
-    # Store result
     tl.store(c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn,
              acc,
              mask=(offs_m[:, None] < M) & (offs_n[None, :] < N))
 ```
 
-**Grid:** `(M // BLOCK_M, N // BLOCK_N)` - 2D grid of output tiles.
+**Grid:** `(ceil(M/BLOCK_M), ceil(N/BLOCK_N))` — 2D grid of output tiles.
 
-### 4.6 Softmax Kernel
+### Phase 4: Attention Kernels
 
-**What it does:** Numerically stable softmax
-```
-y = exp(x - max(x)) / sum(exp(x - max(x)))
-```
+#### 4.7 Attention Scores Kernel
 
-```python
-x = tl.load(x_ptr + row * stride_x + offs, mask=mask, other=-float("inf"))
-x = x - tl.max(x, axis=0)       # Subtract max for stability
-exp_x = tl.exp(x)                # Exponentiate
-denom = tl.sum(exp_x, axis=0)    # Sum
-y = exp_x / denom                # Normalize
-```
+Computes `Q @ K^T * scale` for one query position. Loads a 1D query vector and
+a 2D key matrix, does broadcast-multiply and reduction.
 
-**Why subtract max?** Without this, `exp(large_number)` overflows to infinity.
+#### 4.8 Softmax In-Place Kernel
 
-### 4.7 Attention Score Kernel
+Same algorithm as softmax_kernel but writes back to the input buffer (saves allocation).
 
-**What it does:** Compute Q @ K^T * scale for one query position
-```
-scores[bh, q, :] = sum(K[bh, :, :] * Q[bh, q, :], dim=-1) * scale
-```
+#### 4.9 Attention Output Kernel
 
-Uses the pattern: load one query vector (1D), load all keys (2D),
-broadcast-multiply and reduce.
+Computes `attn_weights @ V` — weighted sum of value vectors.
 
-### 4.8 Softmax In-Place Kernel
+### Phase 5: Positional Encoding
 
-Same as softmax_kernel but writes back to the input buffer (saves memory allocation).
+#### 4.10 RoPE Frequency Kernel
 
-### 4.9 Attention Output Kernel
-
-**What it does:** Compute weighted sum: output = attn_weights @ V
-```
-output[bh, q, :] = sum(V[bh, :, :] * weights[bh, q, :, None], dim=0)
-```
-
-### 4.10 RoPE Frequency Kernel
-
-**What it does:** Compute cos/sin for rotary position embeddings
-```
-freqs = position * inv_freq
-cos_cache[pos, :half] = cos(freqs)
-cos_cache[pos, half:] = cos(freqs)  # Duplicated
-sin_cache[pos, :half] = sin(freqs)
-sin_cache[pos, half:] = sin(freqs)  # Duplicated
-```
+Precomputes `cos/sin(position * inv_freq)` for all positions and frequencies.
+The output is duplicated into both halves (first half = second half) because
+`apply_rotary_pos_emb` splits the input and applies the same frequencies to each half.
 
 ---
 
@@ -278,84 +289,59 @@ python rope.py          # Tests RoPE frequency computation
 ### End-to-end benchmark:
 ```bash
 cd hw1-asr
-./benchmark.sh glm_asr_triton_template     # Your implementation
-./benchmark.sh glm_asr_triton_example       # Reference baseline
+python benchmark_student.py glm_asr_triton_template --warmup 1 --runs 3
+
+# Compare against baseline
+python benchmark_student.py glm_asr_triton_example --warmup 1 --runs 3
 ```
 
-Expected output: `CONCORD RETURNED TO ITS PLACE AMIDST THE TENTS`
-
-The benchmark harness prefers `generate_v8b()` automatically when the model
-exposes it. In the current Triton template that means:
-- one prefill pass for the full prompt
-- pre-allocated KV buffers for all later decode steps
-- LM-head evaluation only on the newest token
-- direct greedy `argmax` when `top_k=1`
+Expected output: `Concord returned to its place amidst the tents.`
 
 ---
 
 ## 6. Optimization Strategies
 
-### 6.1 Tune Tile/Block Sizes
-Try different configurations:
+### 6.1 Backend Selection
 ```python
-# In layers.py, class Linear:
-TILE_M = 128  # Try 32, 64, 128
-TILE_N = 128  # Try 32, 64, 128
-TILE_K = 64   # Try 16, 32, 64
+# In __init__.py:
+layers.Linear.BACKEND = "torch"   # cuBLAS — fastest for large matmuls on modern GPUs
+layers.Linear.BACKEND = "triton"  # Your Triton kernel — good for learning/custom tuning
 ```
 
-### 6.2 Use Triton Autotuning
+We measured cuBLAS to be slightly faster on RTX 5090 (214ms vs 226ms with Triton).
+
+### 6.2 Enable Kernel Fusion
 ```python
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_M': 64, 'BLOCK_N': 64, 'BLOCK_K': 32}, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'BLOCK_K': 64}, num_warps=8),
-    ],
-    key=['M', 'N', 'K'],
-)
-@triton.jit
-def linear_kernel_tf32(...):
+# In __init__.py:
+layers.MLP.FUSED = True           # Fused SwiGLU in decoder MLP
+layers.EncoderMLP.FUSED = True    # Fused Linear+GELU in encoder MLP
+```
+Note: `EncoderMLP.FUSED` only takes effect if model.py uses the `EncoderMLP` class.
+The original model.py uses separate `fc1`/`fc2` calls, so this flag has no effect
+with the unmodified model. `MLP.FUSED` does work for the decoder's SwiGLU.
+
+### 6.3 Tune Tile/Block Sizes
+```python
+# In layers.py:
+Linear.TILE_M = 128  # Try 32, 64, 128
+Linear.TILE_N = 128
+Linear.TILE_K = 64
+
+MLP.TILE_M, MLP.TILE_N, MLP.TILE_K = 64, 64, 32  # Smaller for fused kernels
 ```
 
-### 6.3 Kernel Fusion
-Fuse consecutive operations into one kernel to eliminate intermediate memory reads/writes:
-- Linear + GELU -> `linear_gelu_kernel` (already provided)
-- Linear + SiLU * Linear -> `swiglu_fused_kernel` (already provided)
-- Audio encoder MLP -> `EncoderMLP` now uses the fused `linear_gelu_kernel`
-- Projector first stage -> `LinearGELU` now fuses `linear_1 + GELU`
+### 6.4 Activation Block Size
+GELU and SiLU use BLOCK_SIZE=1024 by default. On GPUs with many SMs (like RTX 5090
+with 170 SMs), larger blocks reduce launch overhead.
 
-### 6.4 Keep Linear on Triton in This Container
-The benchmarked environment bypasses cuBLAS, so the optimized setting here is:
-```python
-Linear.BACKEND = "triton"
-```
+### 6.5 What We Can't Optimize (model.py is read-only)
+The original `model.py` `generate()` method re-runs the **full sequence** through
+all 28 decoder layers for each new token. This means:
+- No KV cache — previous computations are not reused
+- O(n^2) decode cost — each new token reprocesses all prior tokens
+- Adding KV cache (`generate_v8b`) would likely cut inference to <200ms
 
-Reason: cuBLAS GEMM calls in this container were not reliable during testing,
-while the Triton linear kernels were stable and produced the benchmarked result.
-So the current benchmark configuration intentionally avoids cuBLAS for `Linear`.
-
-### 6.5 KV Cache for Decoder
-Use pre-allocated KV buffers to avoid tensor concatenation during generation:
-```python
-output = model.generate_v8b(
-    input_features,
-    input_ids=input_ids,
-    input_features_mask=input_features_mask,
-)
-```
-
-### 6.6 Reuse RoPE and Avoid Tiny Fused Launches
-- Precompute decoder RoPE `(cos, sin)` once per prefill/decode step and reuse it
-  across all decoder layers.
-- Keep fused Triton MLP kernels for larger row counts, but fall back to the
-  unfused path for `M=1` decode work where kernel launch and padding overhead
-  can outweigh the fusion benefit.
-
-### 6.7 Prefer SDPA for Attention Hot Paths
-`attention.py` now tries `torch.nn.functional.scaled_dot_product_attention`
-first. On supported CUDA runtimes this can dispatch to fused SDPA /
-FlashAttention-style kernels and handle GQA without explicitly expanding KV
-heads. The original Triton path remains as a fallback.
+This is the single biggest performance bottleneck that we cannot address.
 
 ---
 
@@ -363,35 +349,29 @@ heads. The original Triton path remains as a fallback.
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `CUDA error: invalid configuration argument` | BLOCK_SIZE too large | Reduce block size to power of 2 |
+| `CUDA error: invalid configuration argument` | BLOCK_SIZE too large | Reduce to power of 2, max ~1024 |
 | `triton.CompilationError` | Mismatched tensor shapes | Check mask dimensions match data |
-| `RuntimeError: Triton Error [CUDA]: invalid argument` | Grid size 0 or negative | Add `max(1, ...)` to grid dims |
+| `CUBLAS_STATUS_INVALID_VALUE` | cuBLAS version mismatch | `pip uninstall nvidia-cublas` (use system libs) |
 | Values all zero | Mask not applied correctly | Verify `offs < size` mask |
 | NaN/Inf in output | Missing numerical stability | Subtract max before exp in softmax |
-| Wrong results in matmul | Stride computation error | Print strides, verify A(M,K) @ B(K,N) |
+| Wrong matmul results | Stride computation error | Print strides, verify A(M,K) @ B(K,N) |
+| `RuntimeError: forward compatibility` | CUDA toolkit/driver mismatch | Match driver to toolkit version |
 
 ---
 
-## 8. Performance Targets
+## 8. Performance Results
 
-| Implementation | Expected Time |
-|----------------|---------------|
-| PyTorch CPU (`glm_asr_scratch`) | ~30s |
-| Triton baseline (`glm_asr_triton_example`) | ~500ms |
-| Optimized Triton (your goal) | <200ms |
+| Implementation | Time | Speed | vs Baseline |
+|----------------|------|-------|-------------|
+| Our optimized template | **214ms** | 16.5ms/tok | **18% faster** |
+| Example baseline | 261ms | 20.1ms/tok | — |
+| CPU fallback (no GPU) | ~14,000ms | ~1,000ms/tok | — |
 
-Key optimizations for <200ms:
-1. Keep `Linear.BACKEND = "triton"` so cuBLAS stays bypassed
-2. Keep fused kernels enabled, but skip them for tiny decode rows
-3. Use `generate_v8b` so decode reuses pre-allocated KV buffers
-4. Reuse decoder RoPE setup across all layers in a step
-5. Let attention use SDPA/FlashAttention-style kernels when the runtime supports it
-6. Treat `top_k=1` as greedy decoding instead of sorting the full vocabulary
-
-Current measured benchmark on the provided `test_audio.wav` after these changes:
-- `185.3 ms (+/- 0.6 ms)` over 3 runs
-- `14.25 ms/token`
-- `100.0%` accuracy
+Key optimizations that helped:
+1. cuBLAS backend for Linear layers (vs Triton kernel)
+2. Fused SwiGLU kernel for decoder MLP
+3. GELU/SiLU block size 1024 (vs 256)
+4. Linear tile sizes 128/128/64
 
 ---
 
