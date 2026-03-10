@@ -16,7 +16,7 @@ if _dir not in sys.path:
 
 from . import layers
 
-layers.Linear.BACKEND = "triton"
+layers.Linear.BACKEND = "torch"
 layers.MLP.FUSED = True
 layers.EncoderMLP.FUSED = True
 

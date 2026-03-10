@@ -648,11 +648,11 @@ def get_activation(name: str):
 class Linear:
     """Linear layer with switchable backend (torch or Triton)."""
 
-    TILE_M = 64
-    TILE_N = 64
-    TILE_K = 32
+    TILE_M = 128
+    TILE_N = 128
+    TILE_K = 64
 
-    BACKEND = "triton"  # Keep cuBLAS bypassed in this environment
+    BACKEND = "torch"  # Use cuBLAS (fastest for matmul on Blackwell)
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
         self.in_features = in_features
