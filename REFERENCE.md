@@ -17,17 +17,17 @@ Quick reference for kernel signatures, model architecture, and performance tunin
 | | Activation | GELU |
 | | RoPE | 50% partial (rotary_dim=32) |
 | **Projector** | Pool factor | 4 |
-| | Hidden | 5120 -> 4096 -> 3584 |
-| **Text Decoder** | Hidden size | 3584 |
-| | Q heads | 28 |
-| | KV heads | 4 (GQA, 7:1 ratio) |
+| | Hidden | 5120 -> 4096 -> 2048 |
+| **Text Decoder** | Hidden size | 2048 |
+| | Q heads | 16 |
+| | KV heads | 4 (GQA, 4:1 ratio) |
 | | Head dim | 128 |
 | | Num layers | 28 |
-| | Intermediate | 18944 |
+| | Intermediate | 6144 |
 | | Norm | RMSNorm |
 | | Activation | SiLU/SwiGLU |
 | | RoPE | 100% (rotary_dim=128) |
-| **LM Head** | Vocab size | 151552 |
+| **LM Head** | Vocab size | 59264 |
 
 ---
 
@@ -106,19 +106,19 @@ Encoder (32 layers):
 
 Encoder output:      (1, T/2, 1280)
 Pool 4 frames:       (1, T/8, 5120)        # Concatenate
-Projector:           (1, T/8, 3584)        # 5120 -> 4096 -> 3584
+Projector:           (1, T/8, 2048)        # 5120 -> 4096 -> 2048
 
-Decoder input:       (1, N_tokens, 3584)   # Audio + text embeddings
+Decoder input:       (1, N_tokens, 2048)   # Audio + text embeddings
 Decoder (28 layers):
-  Q proj:            (1, N, 28*128=3584)   # 28 Q heads
+  Q proj:            (1, N, 16*128=2048)   # 16 Q heads
   K/V proj:          (1, N, 4*128=512)     # 4 KV heads (GQA)
-  Reshape Q:         (1, 28, N, 128)
+  Reshape Q:         (1, 16, N, 128)
   Reshape K/V:       (1, 4, N, 128)
-  Expand KV:         (1, 28, N, 128)       # Repeat 7x for GQA
-  Attention:         (1, 28, N, 128)
-  MLP (SwiGLU):      (1, N, 3584) -> 18944 -> 3584
+  Expand KV:         (1, 16, N, 128)       # Repeat 4x for GQA
+  Attention:         (1, 16, N, 128)
+  MLP (SwiGLU):      (1, N, 2048) -> 6144 -> 2048
 
-LM Head:             (1, N, 151552)        # Vocab logits
+LM Head:             (1, N, 59264)         # Vocab logits
 Argmax:              (1, N)                # Token IDs
 ```
 
@@ -128,16 +128,17 @@ Argmax:              (1, N)                # Token IDs
 
 ### Backend Selection
 ```python
-from layers import Linear, MLP, EncoderMLP
+from layers import Linear, MLP, EncoderMLP, LinearGELU
 
 # Linear backend: "torch" (cuBLAS), "triton", or "auto"
 Linear.BACKEND = "torch"    # Fastest for large matmuls
 Linear.BACKEND = "triton"   # Uses your custom kernel
-Linear.BACKEND = "auto"     # Triton if M >= TILE_M, else torch
+Linear.BACKEND = "auto"     # Optional hybrid mode
 
 # Fusion: True enables fused kernels (faster)
 MLP.FUSED = True            # Fused SwiGLU
 EncoderMLP.FUSED = True     # Fused Linear+GELU
+LinearGELU.FUSED = True     # Fused Linear+GELU for one-stage helpers
 
 # Tile sizes for Triton matmul
 Linear.TILE_M = 64          # Output tile rows
@@ -156,6 +157,35 @@ model.generate(
     top_k=1,                           # Top-k (1 = greedy)
 )
 ```
+
+```python
+model.generate_v8b(
+    input_features,
+    input_ids=input_ids,
+    input_features_mask=mask,
+    max_new_tokens=100,
+    top_k=1,
+)
+```
+
+Notes:
+- `benchmark_student.py` prefers `generate_v8b` automatically if the model
+  exposes it.
+- `generate_v8b` pre-allocates KV buffers once and applies the LM head only to
+  the newest token during decode.
+- `top_k=1` should take the greedy argmax path; it should not do a full top-k
+  sort over the vocabulary.
+- In this container, the benchmarked optimized path keeps `Linear.BACKEND =
+  "triton"` so cuBLAS remains bypassed. This is intentional because cuBLAS GEMM
+  calls were not reliable in this environment, while the Triton linear kernels
+  were stable on the measured benchmark path.
+- `attention.py` now prefers PyTorch SDPA / FlashAttention-style kernels first
+  and falls back to the Triton implementation when needed.
+
+Current measured benchmark for `glm_asr_triton_template` on `test_audio.wav`:
+- `185.3 ms (+/- 0.6 ms)` over 3 runs
+- `14.25 ms/token`
+- `100.0%` accuracy
 
 ---
 
@@ -190,6 +220,10 @@ python benchmark_student.py glm_asr_triton_template --audio test_audio.wav
 - [ ] At least 1 kernel fusion active (SwiGLU or Linear+GELU)
 - [ ] Linear backend selection optimized (torch vs triton per layer size)
 - [ ] KV cache enabled for decoder generation
+- [ ] `generate_v8b` exposed so the benchmark uses KV-buffer decode automatically
+- [ ] Decoder RoPE computed once per step and reused across layers
+- [ ] Tiny decode rows skip Triton fused MLP kernels when that is faster
+- [ ] `top_k=1` uses greedy argmax instead of full-vocab top-k sorting
 - [ ] Activation block size tuned (try 256, 512, 1024)
 - [ ] Total inference time < baseline (example implementation)
 - [ ] Target: < 200ms total inference

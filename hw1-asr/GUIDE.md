@@ -50,8 +50,8 @@ The model has three major components. The numbers below come from the actual `Gl
 | Component | Details |
 |-----------|---------|
 | **Audio Encoder** | 32 layers, hidden=1280, 20 heads (head_dim=64), intermediate=5120, **LayerNorm** + **GELU**, partial RoPE (50% of head_dim) |
-| **Projector** | Pools 4 consecutive audio frames (1280x4 = 5120 -> 4096 -> 3584), **GELU** activation |
-| **Text Decoder** | 28 layers, hidden=3584, 28 Q heads / 4 KV heads (GQA, head_dim=128), intermediate=18944, **RMSNorm** + **SiLU/SwiGLU**, full RoPE (base=500000) |
+| **Projector** | Pools 4 consecutive audio frames (1280x4 = 5120 -> 4096 -> 2048), **GELU** activation |
+| **Text Decoder** | 28 layers, hidden=2048, 16 Q heads / 4 KV heads (GQA, head_dim=128), intermediate=6144, **RMSNorm** + **SiLU/SwiGLU**, full RoPE (base=500000) |
 
 ### Which Kernel Goes Where
 

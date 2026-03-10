@@ -187,20 +187,29 @@ once and reused for both matmuls.
 **`Linear` class:** Switchable between torch (cuBLAS) and Triton backends.
 - `BACKEND = "torch"`: Uses `x @ weight.t()` (cuBLAS matmul)
 - `BACKEND = "triton"`: Uses `linear_kernel_tf32`
-- `BACKEND = "auto"`: Triton for large M, torch for small M
+- In this container, the optimized path keeps `BACKEND = "triton"` so cuBLAS is
+  bypassed during benchmarking. This is the current measured configuration
+  because cuBLAS GEMM calls were observed to fail in this environment, while the
+  Triton linear path runs correctly.
 - Caches transposed/padded weights (`_weight_t_padded`)
 
 **`MLP` class:** Implements SwiGLU gating:
 ```
 output = down_proj(SiLU(gate_proj(x)) * up_proj(x))
 ```
-When `FUSED=True`, uses `swiglu_fused_kernel` for the gate+up computation.
+When `FUSED=True`, uses `swiglu_fused_kernel` for the gate+up computation, but
+only once the row count is large enough for the fused Triton path to pay off.
 
 **`EncoderMLP` class:** Simpler MLP without gating:
 ```
 output = fc2(GELU(fc1(x)))
 ```
-When `FUSED=True`, uses `linear_gelu_kernel` for fc1+GELU.
+When `FUSED=True`, uses `linear_gelu_kernel` for fc1+GELU, again with a
+small-tensor fallback to avoid hurting single-row decode latency.
+
+**`LinearGELU` class:** A lighter helper for `GELU(Linear(x))` when there is no
+second same-shape projection to wrap in `EncoderMLP`. The projector uses this
+for its first `linear_1 + GELU` stage.
 
 ---
 
@@ -213,14 +222,19 @@ The core of every transformer. Computes:
 Attention(Q, K, V) = softmax(Q @ K^T / sqrt(d_k)) @ V
 ```
 
-**Three-kernel approach:**
+**Primary path:** The runtime now first tries PyTorch's
+`torch.nn.functional.scaled_dot_product_attention`. On CUDA this can dispatch
+to a fused SDPA/FlashAttention-style backend, and it also supports grouped
+query attention directly via `enable_gqa=True`.
+
+**Fallback path:** If SDPA is unavailable for the current runtime or shape, the
+code falls back to the original three-stage implementation:
 1. `attention_scores_kernel`: Computes `Q @ K^T * scale`
 2. `softmax_inplace_kernel`: Applies softmax to scores
 3. `attention_output_kernel`: Computes `softmax_scores @ V`
 
-**Why three separate kernels instead of one?**
-Between scores and output, we may need to apply masks (causal mask,
-attention mask). Separating the kernels allows flexible masking.
+That fallback still exists for study/debugging and for runtimes where the fused
+backend cannot be used.
 
 ### 3.2 Attention Scores Kernel
 
@@ -235,14 +249,12 @@ This is essentially a matrix-vector product: one row of Q dotted with all rows o
 
 ### 3.3 Grouped Query Attention (GQA)
 
-The text decoder uses GQA: 28 query heads but only 4 KV heads.
-Each KV head is shared by 7 query heads. This reduces KV cache memory by 7x.
+The text decoder uses GQA: 16 query heads but only 4 KV heads.
+Each KV head is shared by 4 query heads. This reduces KV cache memory by 4x.
 
-```python
-# In MultiHeadAttention.__call__:
-k = self._expand_kv(k, self.num_queries_per_kv)  # 4 heads -> 28 heads
-v = self._expand_kv(v, self.num_queries_per_kv)   # Using expand (zero-copy)
-```
+With SDPA enabled, this expansion is avoided in the fast path because
+`scaled_dot_product_attention(..., enable_gqa=True)` understands grouped KV
+heads directly. The explicit head expansion is only used in the fallback path.
 
 ### 3.4 Causal Masking
 
@@ -324,27 +336,31 @@ class AudioEncoder:
 4. 32x transformer layers with RoPE
 5. Final LayerNorm
 
+**Important implementation detail:** `AudioEncoderLayer` now wraps its GELU MLP
+with `EncoderMLP`, but still exposes `fc1` and `fc2` aliases so the existing
+HuggingFace weight-loading code keeps working unchanged.
+
 ### 5.2 MultiModalProjector
 
 Bridges audio and text spaces:
 ```python
 class MultiModalProjector:
     pool_factor = 4  # Concatenate 4 frames -> 1
-    linear_1: Linear(5120, 4096)  # 1280*4 = 5120
-    linear_2: Linear(4096, 3584)  # Match text hidden size
+    linear_1_gelu: LinearGELU(5120, 4096)  # 1280*4 = 5120
+    linear_2: Linear(4096, 2048)  # Match text hidden size
 ```
 
 Pool 4 audio frames by concatenation: `(1, T/2, 1280)` -> `(1, T/8, 5120)`
-Then two linear projections with GELU.
+Then a fused `LinearGELU` stage (5120 -> 4096) followed by the final projection (4096 -> 2048).
 
 ### 5.3 TextDecoder
 
 ```python
 class TextDecoder:
-    embed_tokens: Embedding(151552, 3584)   # Token -> vector
+    embed_tokens: Embedding(59264, 2048)    # Token -> vector
     rope: RotaryEmbedding(dim=128, base=500000)
     layers: [DecoderLayer x 28]             # Transformer layers
-    norm: RMSNorm(3584)                     # Final normalization
+    norm: RMSNorm(2048)                     # Final normalization
 ```
 
 ### 5.4 DecoderLayer (with KV Cache)
@@ -371,28 +387,43 @@ hidden_states, new_pos = layer.forward_with_kv_buffer(
 # Writes directly to buffer at cache_pos offset
 ```
 
+**Shared RoPE setup:** `TextDecoder` now computes `(cos, sin)` once per decoder
+forward/decode step and passes it to every layer, instead of re-indexing the
+RoPE cache separately inside all 28 decoder layers.
+
 ### 5.5 Generation Pipeline
 
 ```python
-def generate(input_features, input_ids, ...):
-    # 1. Encode audio -> (1, T/8, 3584) embeddings
-    audio_embeds = self.encode_audio(input_features)
+def generate_v8b(input_features, input_ids, ...):
+    # 1. Encode audio and splice it into the prompt embeddings once
+    inputs_embeds, seed_tokens = self._prepare_generation_inputs(...)
 
-    # 2. Get text embeddings for input tokens
-    text_embeds = self.text_decoder.embed_tokens(input_ids)
+    # 2. Allocate KV buffers for all decoder layers
+    kv_buffers = self.text_decoder.allocate_kv_buffers(
+        batch_size=seed_tokens.shape[0],
+        max_seq_len=inputs_embeds.shape[1] + max_new_tokens,
+    )
 
-    # 3. Replace audio placeholder tokens with actual audio embeddings
-    inputs_embeds = [text_before_audio, audio_embeds, text_after_audio]
+    # 3. Prefill once, then decode one token at a time
+    hidden_states, cache_pos = self.text_decoder.forward_with_kv_buffers(
+        inputs_embeds, kv_buffers, cache_pos=0
+    )
+    logits = self.lm_head(hidden_states[:, -1:, :])
 
-    # 4. Autoregressive loop
     for _ in range(max_new_tokens):
-        logits = self.decode(inputs_embeds=inputs_embeds)
-        next_token = top_k_sample(logits[:, -1, :])
+        next_token = sample_or_argmax(logits[:, -1, :])
         if next_token == EOS: break
-        inputs_embeds = cat([inputs_embeds, embed(next_token)])
+        hidden_states, cache_pos = self.text_decoder.forward_with_kv_buffers(
+            embed(next_token), kv_buffers, cache_pos
+        )
+        logits = self.lm_head(hidden_states[:, -1:, :])
 
     return generated_token_ids
 ```
+
+For the benchmark setting `top_k=1`, the code now takes the greedy `argmax`
+path directly instead of sorting the full vocabulary for a degenerate top-k
+sample.
 
 ---
 
@@ -402,8 +433,7 @@ Conv1D layers that downsample the mel spectrogram:
 
 ```python
 class Conv1d:
-    """1D convolution using PyTorch (not worth writing a Triton kernel for)."""
-    # Uses torch.nn.functional.conv1d under the hood
+    """1D convolution using im2col + Triton matmul kernels."""
 
 class Conv1dSubsampler:
     """Stack of Conv1D layers for progressive downsampling."""
@@ -411,8 +441,14 @@ class Conv1dSubsampler:
     conv2: Conv1d(1280, 1280, kernel=3, stride=2)  # Halve length
 ```
 
-**Why not Triton?** Convolutions are highly optimized in cuDNN/cuBLAS.
-Writing a custom Triton kernel wouldn't be faster for this use case.
+**How it works:** `conv.py` first uses `im2col_1d()` to turn the convolution
+windowing problem into a matrix multiply, then dispatches one of two Triton
+matmul kernels:
+- `conv1d_matmul_kernel` for small padded shapes that fit the fixed tile limits
+- `conv1d_matmul_tiled_kernel` for larger CUDA cases
+
+CPU fallback uses a Torch `einsum`, but the implementation is not a simple
+`torch.nn.functional.conv1d` wrapper.
 
 ---
 
@@ -483,7 +519,7 @@ def check_transcription(transcription, expected):
 4. Audio Encoder (32 transformer layers)
    For each layer:
      a. LayerNorm(hidden_states)           [layernorm_kernel]
-     b. Q = Linear(normalized)             [linear_kernel_tf32 or cuBLAS]
+     b. Q = Linear(normalized)             [linear_kernel_tf32]
      c. K = Linear(normalized)
      d. V = Linear(normalized)
      e. Reshape to (batch, heads, seq, dim)
@@ -498,35 +534,35 @@ def check_transcription(transcription, expected):
    |
 5. Multi-Modal Projector
    -> Pool 4 frames: (1, ~62, 5120)
-   -> Linear+GELU: (1, ~62, 4096)         [gelu_kernel]
-   -> Linear: (1, ~62, 3584)
+   -> Linear+GELU: (1, ~62, 4096)         [linear_gelu_kernel (fused)]
+   -> Linear: (1, ~62, 2048)
    |
 6. Embed input tokens (chat template + audio placeholders)
    -> Replace audio placeholders with projected audio embeddings
-   -> Combined: (1, ~80, 3584)
+   -> Combined: (1, ~80, 2048)
    |
 7. Text Decoder (28 transformer layers)
    For each layer:
      a. RMSNorm(hidden_states)             [rmsnorm_kernel]
-     b. Q (28 heads) = Linear(normalized)
-     c. K (4 heads) = Linear(normalized)   [GQA: 4 KV heads shared by 28 Q heads]
+     b. Q (16 heads) = Linear(normalized)
+     c. K (4 heads) = Linear(normalized)   [GQA: 4 KV heads shared by 16 Q heads]
      d. V (4 heads) = Linear(normalized)
-     e. Expand KV: 4 -> 28 heads           [broadcast, zero-copy]
+     e. Expand KV: 4 -> 16 heads           [broadcast, zero-copy]
      f. Apply full RoPE to Q, K
      g. Causal Attention (no looking ahead)
      h. RMSNorm(hidden)
-     i. SwiGLU MLP:
+     i. SwiGLU MLP (2048 -> 6144 -> 2048):
         gate = SiLU(Linear(x))             [silu_kernel or swiglu_fused_kernel]
         up = Linear(x)
         down = Linear(gate * up)
      j. hidden = residual + MLP_output
    |
 8. Final RMSNorm + LM Head
-   -> Logits: (1, ~80, 151552)
+   -> Logits: (1, ~80, 59264)
    |
 9. Autoregressive Generation (loop)
    For each new token:
-     -> Take last logits: (1, 151552)
+     -> Take last logits: (1, 59264)
      -> Top-k sampling -> next_token_id
      -> If EOS: stop
      -> Embed next_token -> feed back to decoder
@@ -541,7 +577,7 @@ def check_transcription(transcription, expected):
 |--------|:-:|:-:|:-:|
 | rmsnorm_kernel | 2 | 28 | 56 |
 | layernorm_kernel | 2 | 32 | 64 |
-| linear_kernel_tf32 (or cuBLAS) | 5-6 | 60 | ~300 |
+| linear_kernel_tf32 | 5-6 | 60 | ~300 |
 | gelu_kernel | 1 | 32 | 32 |
 | silu_kernel | 1 | 28 | 28 |
 | softmax (attention) | 1 | 60 | 60 |

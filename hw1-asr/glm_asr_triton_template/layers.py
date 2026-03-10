@@ -200,6 +200,7 @@ def linear_kernel_tf32(
 def linear_gelu_kernel(
     a_ptr,
     b_ptr,
+    bias_ptr,
     c_ptr,
     M,
     N,
@@ -208,6 +209,7 @@ def linear_gelu_kernel(
     stride_ak,
     stride_bk,
     stride_bn,
+    stride_bias,
     stride_cm,
     stride_cn,
     BLOCK_M: tl.constexpr,
@@ -236,10 +238,17 @@ def linear_gelu_kernel(
         )
         acc += tl.dot(a, b)
 
+    bias = tl.load(
+        bias_ptr + offs_n * stride_bias,
+        mask=offs_n < N,
+        other=0.0,
+    )
+    acc = acc + bias[None, :]
+
     sqrt_2_over_pi = 0.7978845608028654
     acc3 = acc * acc * acc
     inner = sqrt_2_over_pi * (acc + 0.044715 * acc3)
-    acc = acc * 0.5 * (1.0 + tl.libdevice.tanh(inner))
+    acc = acc * 0.5 * (1.0 + tl.extra.cuda.libdevice.tanh(inner))
 
     tl.store(
         c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn,
@@ -643,7 +652,7 @@ class Linear:
     TILE_N = 64
     TILE_K = 32
 
-    BACKEND = "triton"  # Use Triton kernels (cuBLAS broken on this driver)
+    BACKEND = "triton"  # Keep cuBLAS bypassed in this environment
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
         self.in_features = in_features
@@ -843,6 +852,98 @@ def softmax(x: torch.Tensor, axis: int = -1) -> torch.Tensor:
     return result
 
 
+class LinearGELU:
+    """Linear layer followed by GELU, with optional fused Triton path."""
+
+    FUSED = True
+
+    def __init__(self, in_features: int, out_features: int, bias: bool = True):
+        self.linear = Linear(in_features, out_features, bias=bias)
+        self.in_features = in_features
+        self.out_features = out_features
+        self.bias_enabled = bias
+        self._weight_t = None
+
+    def _prepare_fused_weights(self):
+        if self._weight_t is None:
+            self._weight_t = self.linear.weight.t().contiguous()
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        if LinearGELU.FUSED and x.is_cuda:
+            return self._forward_fused(x)
+        return gelu(self.linear(x))
+
+    def _forward_fused(self, x: torch.Tensor) -> torch.Tensor:
+        if self.linear.weight.device != x.device:
+            self.linear.weight = self.linear.weight.to(x.device)
+            self._weight_t = None
+        self._prepare_fused_weights()
+
+        orig_shape = x.shape
+        x_2d = x.reshape(-1, self.in_features).to(torch.float32).contiguous()
+        M = x_2d.shape[0]
+        K = self.in_features
+        N = self.out_features
+
+        M_pad = pad_to_multiple(M, self.linear.TILE_M)
+        K_pad = pad_to_multiple(K, self.linear.TILE_K)
+        N_pad = pad_to_multiple(N, self.linear.TILE_N)
+
+        if M != M_pad or K != K_pad:
+            x_padded = torch.zeros((M_pad, K_pad), dtype=torch.float32, device=x.device)
+            x_padded[:M, :K] = x_2d
+        else:
+            x_padded = x_2d
+
+        if K != K_pad or N != N_pad:
+            weight_padded = torch.zeros((K_pad, N_pad), dtype=torch.float32, device=x.device)
+            weight_padded[:K, :N] = self._weight_t
+        else:
+            weight_padded = self._weight_t
+
+        if self.bias_enabled and self.linear.bias_param is not None:
+            if self.linear.bias_param.device != x.device:
+                self.linear.bias_param = self.linear.bias_param.to(x.device)
+            if N != N_pad:
+                bias_padded = torch.zeros((N_pad,), dtype=torch.float32, device=x.device)
+                bias_padded[:N] = self.linear.bias_param
+            else:
+                bias_padded = self.linear.bias_param
+        else:
+            bias_padded = torch.zeros((N_pad,), dtype=torch.float32, device=x.device)
+
+        output = torch.zeros((M_pad, N_pad), dtype=torch.float32, device=x.device)
+
+        grid = (
+            triton.cdiv(M_pad, self.linear.TILE_M),
+            triton.cdiv(N_pad, self.linear.TILE_N),
+        )
+        linear_gelu_kernel[grid](
+            x_padded,
+            weight_padded,
+            bias_padded,
+            output,
+            M_pad,
+            N_pad,
+            K_pad,
+            x_padded.stride(0),
+            x_padded.stride(1),
+            weight_padded.stride(0),
+            weight_padded.stride(1),
+            bias_padded.stride(0),
+            output.stride(0),
+            output.stride(1),
+            BLOCK_M=self.linear.TILE_M,
+            BLOCK_N=self.linear.TILE_N,
+            BLOCK_K=self.linear.TILE_K,
+        )
+
+        if M != M_pad or N != N_pad:
+            output = output[:M, :N]
+
+        return output.reshape(*orig_shape[:-1], self.out_features)
+
+
 class MLP:
     """MLP with SwiGLU gating using Triton."""
 
@@ -883,7 +984,8 @@ class MLP:
             self._up_weight_t = self.up_proj.weight.t().contiguous()
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        if self.use_gating and MLP.FUSED and x.is_cuda:
+        num_rows = int(np.prod(x.shape[:-1]))
+        if self.use_gating and MLP.FUSED and x.is_cuda and num_rows >= self.TILE_M:
             return self._forward_fused(x)
         return self._forward_standard(x)
 
@@ -999,7 +1101,13 @@ class EncoderMLP:
             self._fc1_weight_t = self.fc1.weight.t().contiguous()
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        if EncoderMLP.FUSED and self.activation == "gelu" and x.is_cuda:
+        num_rows = int(np.prod(x.shape[:-1]))
+        if (
+            EncoderMLP.FUSED
+            and self.activation == "gelu"
+            and x.is_cuda
+            and num_rows >= self.TILE_M
+        ):
             return self._forward_fused(x)
         return self._forward_standard(x)
 
@@ -1040,6 +1148,19 @@ class EncoderMLP:
         else:
             fc1_w_padded = self._fc1_weight_t
 
+        if self.bias_enabled and self.fc1.bias_param is not None:
+            if self.fc1.bias_param.device != x.device:
+                self.fc1.bias_param = self.fc1.bias_param.to(x.device)
+            if N != N_pad:
+                fc1_bias_padded = torch.zeros(
+                    (N_pad,), dtype=torch.float32, device=x.device
+                )
+                fc1_bias_padded[:N] = self.fc1.bias_param
+            else:
+                fc1_bias_padded = self.fc1.bias_param
+        else:
+            fc1_bias_padded = torch.zeros((N_pad,), dtype=torch.float32, device=x.device)
+
         intermediate = torch.zeros(
             (M_pad, N_pad), dtype=torch.float32, device=x.device
         )
@@ -1051,6 +1172,7 @@ class EncoderMLP:
         linear_gelu_kernel[grid](
             x_padded,
             fc1_w_padded,
+            fc1_bias_padded,
             intermediate,
             M_pad,
             N_pad,
@@ -1059,6 +1181,7 @@ class EncoderMLP:
             x_padded.stride(1),
             fc1_w_padded.stride(0),
             fc1_w_padded.stride(1),
+            fc1_bias_padded.stride(0),
             intermediate.stride(0),
             intermediate.stride(1),
             BLOCK_M=self.TILE_M,
@@ -1068,11 +1191,6 @@ class EncoderMLP:
 
         if M != M_pad or N != N_pad:
             intermediate = intermediate[:M, :N]
-
-        if self.bias_enabled and self.fc1.bias_param is not None:
-            if self.fc1.bias_param.device != x.device:
-                self.fc1.bias_param = self.fc1.bias_param.to(x.device)
-            intermediate = intermediate + self.fc1.bias_param
 
         intermediate = intermediate.reshape(*orig_shape[:-1], self.intermediate_size)
         return self.fc2(intermediate)

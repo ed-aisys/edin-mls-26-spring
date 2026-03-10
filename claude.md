@@ -142,6 +142,33 @@ python rope.py       -> Triton RoPE working!
 - `generate_v8b` with pre-allocated KV buffers (avoids tensor concatenation)
 - Allocate once, write at cache_pos offset during generation
 
+#### 5.5 2026-03-10 Inference Path Fixes
+- Implemented the actual `generate_v8b` method in `glm_asr_triton_template/model.py`
+  so `benchmark_student.py` now picks the cached path automatically.
+- Prefill now runs once, then decode steps reuse pre-allocated KV buffers and only
+  apply the LM head to the newest token instead of the full prompt on every step.
+- Decoder RoPE cos/sin are now computed once per decoder pass and reused across all
+  layers for both prefill and single-token decode.
+- `attention.py` now prefers PyTorch SDPA (`scaled_dot_product_attention`) with
+  `enable_gqa=True` and falls back to the Triton/Torch implementation if SDPA
+  is unavailable on the runtime.
+- `layers.py` keeps `Linear.BACKEND = "triton"` in this container so cuBLAS stays
+  bypassed. This is intentional: cuBLAS GEMM calls in this container were not
+  reliable during testing, so the benchmarked linear path does not use cuBLAS.
+  Fused MLP kernels only run when the batch-row count is large enough to justify
+  a Triton launch.
+
+#### 5.6 2026-03-10 Fused MLP Follow-up
+- Audio encoder layers now use `EncoderMLP` for their GELU MLP path, which finally
+  activates the existing `linear_gelu_kernel` across all 32 encoder blocks.
+- The projector now uses a fused `LinearGELU` helper for `linear_1 + GELU` before
+  the final projection.
+- `generate_v8b` now treats `top_k=1` as greedy `argmax` instead of sorting the
+  whole vocabulary for a degenerate top-k sample.
+- Fixed two dormant fused-kernel issues uncovered by these changes:
+  - `linear_gelu_kernel` now uses `tl.extra.cuda.libdevice.tanh`
+  - encoder fused GELU now applies `fc1` bias before GELU, not after
+
 ---
 
 ## Architecture Overview (Actual Nano Config)
@@ -166,7 +193,7 @@ Audio (WAV 16kHz)
 | `glm_asr_triton_template/layers.py` | All layer kernels (6 implemented) |
 | `glm_asr_triton_template/attention.py` | Attention kernels (3 implemented) |
 | `glm_asr_triton_template/rope.py` | RoPE kernel (1 implemented) |
-| `glm_asr_triton_template/model.py` | Full model architecture (unchanged) |
+| `glm_asr_triton_template/model.py` | Full model architecture + cached generation path |
 | `glm_asr_triton_template/conv.py` | Conv1D layers (unchanged) |
 | `glm_asr_triton_template/weight_loader.py` | HuggingFace weight loading (unchanged) |
 | `benchmark_student.py` | End-to-end benchmark script |
@@ -196,7 +223,19 @@ Model loaded and validated on CPU (CUDA unavailable due to driver mismatch):
 - **Accuracy:** 100% (all 8 expected words matched)
 - **Tokens generated:** 13
 - **CPU time:** ~13.8s (will be ~200ms on GPU with optimizations)
-- **Generate function used:** `generate` (basic mode, KV cache not used on CPU)
+- **Generate function used at the time:** `generate` (this log predated the
+  `generate_v8b` implementation in the current code)
+
+## Benchmark Status After 2026-03-10 Changes
+
+Fresh GPU benchmark on **2026-03-10** for `glm_asr_triton_template`:
+- **Time:** `185.3 ms` (`+/- 0.6 ms`) over 3 runs
+- **Tokens:** `13`
+- **Speed:** `14.25 ms/token`
+- **Accuracy:** `100.0%`
+
+This improved on the user-reported earlier benchmark of **188 ms** while keeping
+the transcription correct.
 
 ## GPU Environment Issue
 

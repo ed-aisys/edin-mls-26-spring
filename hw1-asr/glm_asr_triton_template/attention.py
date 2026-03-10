@@ -8,6 +8,7 @@ Fill in the TODO sections to implement attention using Triton kernels
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 from typing import Optional, Tuple
@@ -237,13 +238,6 @@ class MultiHeadAttention:
         Returns:
             Output (batch, num_heads, seq_q, head_dim)
         """
-        batch, num_heads, seq_q, head_dim = q.shape
-        _, num_kv_heads, seq_k, _ = k.shape
-
-        if num_kv_heads != num_heads:
-            k = self._expand_kv(k, self.num_queries_per_kv)
-            v = self._expand_kv(v, self.num_queries_per_kv)
-
         return scaled_dot_product_attention(
             q, k, v, attention_mask, is_causal, self.scale
         )
@@ -265,6 +259,19 @@ def next_power_of_two(x: int) -> int:
 MAX_ATTENTION_DIM = 256
 
 
+def _expand_kv_heads(
+    x: torch.Tensor,
+    num_query_heads: int,
+) -> torch.Tensor:
+    """Expand grouped KV heads to query-head count for non-SDPA fallbacks."""
+    batch, num_kv_heads, seq_len, head_dim = x.shape
+    num_repeats = num_query_heads // num_kv_heads
+    x_expanded = x[:, :, None, :, :].expand(
+        batch, num_kv_heads, num_repeats, seq_len, head_dim
+    )
+    return x_expanded.reshape(batch, num_query_heads, seq_len, head_dim)
+
+
 def scaled_dot_product_attention(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -274,13 +281,37 @@ def scaled_dot_product_attention(
     scale: Optional[float] = None,
 ) -> torch.Tensor:
     """
-    Scaled dot-product attention using Triton kernels.
+    Scaled dot-product attention.
+
+    Prefers PyTorch SDPA on supported runtimes because it can route to
+    fused attention kernels and handle GQA without materializing expanded KV
+    tensors. The Triton and Torch implementations remain as fallbacks.
     """
     batch, num_heads, seq_q, head_dim = q.shape
-    _, _, seq_k, _ = k.shape
+    _, num_kv_heads, seq_k, _ = k.shape
+    use_gqa = num_kv_heads != num_heads
 
     if scale is None:
         scale = 1.0 / np.sqrt(head_dim)
+
+    try:
+        output = F.scaled_dot_product_attention(
+            q.to(torch.float32),
+            k.to(torch.float32),
+            v.to(torch.float32),
+            attn_mask=attention_mask,
+            dropout_p=0.0,
+            is_causal=is_causal,
+            scale=scale,
+            enable_gqa=use_gqa,
+        )
+        return output.to(q.dtype)
+    except (RuntimeError, TypeError):
+        pass
+
+    if use_gqa:
+        k = _expand_kv_heads(k, num_heads)
+        v = _expand_kv_heads(v, num_heads)
 
     seq_k_padded = next_power_of_two(seq_k)
     head_dim_padded = next_power_of_two(head_dim)
