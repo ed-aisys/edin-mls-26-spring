@@ -316,10 +316,6 @@ def scaled_dot_product_attention(
         k = _expand_kv_heads(k, num_heads)
         v = _expand_kv_heads(v, num_heads)
 
-    if use_gqa:
-        k = _expand_kv_heads(k, num_heads)
-        v = _expand_kv_heads(v, num_heads)
-
     seq_k_padded = next_power_of_two(seq_k)
     head_dim_padded = next_power_of_two(head_dim)
 
