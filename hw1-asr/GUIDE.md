@@ -427,11 +427,12 @@ Compare your performance against the example baseline:
 ./benchmark_detailed.sh glm_asr_cutile_example
 ```
 
-Profile specific operators:
+Tune profiling parameters:
 
 ```bash
-./benchmark_detailed.sh --attention-only
-./benchmark_detailed.sh --linear-only
+./benchmark_detailed.sh glm_asr_triton_template --runs 5
+./benchmark_detailed.sh glm_asr_triton_template --seq-len 512
+./benchmark_detailed.sh glm_asr_triton_template --audio /path/to/test_audio.wav
 ```
 
 Generate an Nsight Systems profile:
@@ -445,28 +446,9 @@ Generate an Nsight Systems profile:
 
 ---
 
-## 8. Grading Criteria
+## 8. Troubleshooting Guide
 
-| Criteria | Points | What It Means |
-|----------|:------:|---------------|
-| **Correctness** | **60** | Transcription accuracy > 80% (word-level match against reference) |
-| **Performance** | **30** | Total inference time faster than the example baseline |
-| **Code quality** | **10** | Clean, readable kernel code; appropriate use of Triton/cuTile idioms |
-
-**Correctness**: Run `./benchmark.sh glm_asr_triton_template` (or `./benchmark.sh glm_asr_cutile_template` for cuTile). If `Accuracy: 100.0%` and `Status: PASS`, you get full correctness marks. Any accuracy above 80% passes.
-
-**Performance**: Compare your timing against the example baseline (`./benchmark.sh glm_asr_triton_example` or `./benchmark.sh glm_asr_cutile_example`). Faster = more marks. Consider:
-- Using fused kernels (e.g., `swiglu_fused_kernel` or `linear_gelu_kernel` are already provided)
-- Tuning `BLOCK_SIZE` / tile dimensions
-- Enabling fused mode: set `MLP.FUSED = True` in `layers.py`
-
-**Code quality**: Write clear kernel code. Comment non-obvious logic. Use meaningful variable names.
-
----
-
-## 9. Troubleshooting Guide
-
-### 9.1 Common Errors
+### 8.1 Common Errors
 
 | Error | Likely Cause | Fix |
 |-------|-------------|-----|
@@ -483,7 +465,7 @@ Generate an Nsight Systems profile:
 | `CUDA out of memory` | GPU memory exhausted | Reduce batch size. Close other GPU processes. Check for memory leaks in kernel. |
 | `triton.runtime.errors.OutOfResources` (Triton) | BLOCK_SIZE too large for GPU shared memory | Reduce BLOCK_SIZE. Use smaller tile dimensions. |
 
-### 9.2 Debugging Strategies
+### 8.2 Debugging Strategies
 
 **Strategy 1: Compare with the example implementation**
 
@@ -556,7 +538,7 @@ if cp.isnan(hidden_states).any():
     break
 ```
 
-### 9.3 Performance Debugging
+### 8.3 Performance Debugging
 
 Use `benchmark_detailed.sh` to find your bottleneck:
 
@@ -579,7 +561,7 @@ This shows timing for each operator (attention, linear, normalization, etc.). Fo
 
 ---
 
-## 10. Rules
+## 9. Rules
 
 1. **Must use Triton or cuTile only** -- do not use PyTorch/CuPy operators inside kernels (e.g., no `torch.matmul`, `cp.matmul` as substitutes for your kernel code).
 
@@ -591,7 +573,7 @@ This shows timing for each operator (attention, linear, normalization, etc.). Fo
 
 ---
 
-## 11. References
+## 10. References
 
 **Triton:**
 - [Triton Documentation](https://triton-lang.org/)

@@ -6,15 +6,12 @@
 # Usage:
 #   ./benchmark_detailed.sh <folder_name>           # Full profiling
 #   ./benchmark_detailed.sh <folder_name> --nsys    # Nsight Systems profile
-#   ./benchmark_detailed.sh --attention-only        # Only attention ops
-#   ./benchmark_detailed.sh --linear-only           # Only linear/GEMM ops
 #
 # Examples:
 #   ./benchmark_detailed.sh glm_asr_cutile_example
 #   ./benchmark_detailed.sh glm_asr_cutile_template --runs 5
 #   ./benchmark_detailed.sh glm_asr_cutile_example --nsys
 #   ./benchmark_detailed.sh glm_asr_triton_example
-#   ./benchmark_detailed.sh --attention-only --seq-len 512
 #
 
 set -e
@@ -30,8 +27,6 @@ show_help() {
     echo "  --audio PATH      Path to test audio file"
     echo "  --runs N          Number of profiling runs (default: 3)"
     echo "  --nsys            Run Nsight Systems profiling"
-    echo "  --attention-only  Only profile attention operations"
-    echo "  --linear-only     Only profile linear/GEMM operations"
     echo "  --seq-len N       Sequence length for micro-benchmarks (default: 256)"
     echo "  -h, --help        Show this help message"
     echo ""
@@ -67,7 +62,7 @@ if [ $# -eq 0 ]; then
     exit 0
 fi
 
-# Check if first argument is a flag (micro-benchmark only mode)
+# If first argument is an option, pass through and let argparse handle defaults
 if [[ "$1" == --* ]]; then
     cd "$SCRIPT_DIR"
     python benchmark_detailed.py "$@"
@@ -75,7 +70,7 @@ else
     FOLDER="$1"
     shift
 
-    # Check if folder exists (unless it's a micro-benchmark flag)
+    # Check if the explicitly provided folder exists
     if [ ! -d "$SCRIPT_DIR/$FOLDER" ]; then
         echo "Error: Folder '$FOLDER' not found in $SCRIPT_DIR"
         echo ""

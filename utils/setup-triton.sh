@@ -140,7 +140,7 @@ echo ">>> Installing Triton stack (torch, numpy, triton, cupy, datasets)"
 ask_continue "Install Python packages (torch, numpy, triton, cupy, datasets)?"
 
 pip install --upgrade pip
-pip install torch numpy triton cupy datasets
+pip install torch numpy triton cupy-cuda12x datasets
 
 # =========================
 # Done

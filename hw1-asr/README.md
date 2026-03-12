@@ -240,9 +240,10 @@ Shell scripts provide user-friendly wrappers with folder validation and help mes
 ./benchmark_detailed.sh glm_asr_triton_example
 ./benchmark_detailed.sh glm_asr_cutile_example
 
-# Profile specific operators
-./benchmark_detailed.sh --attention-only
-./benchmark_detailed.sh --linear-only
+# Optional profiling knobs
+./benchmark_detailed.sh glm_asr_triton_template --runs 5
+./benchmark_detailed.sh glm_asr_triton_template --seq-len 512
+./benchmark_detailed.sh glm_asr_triton_template --audio /path/to/test_audio.wav
 
 # Generate Nsight Systems profile
 ./benchmark_detailed.sh glm_asr_triton_template --nsys
