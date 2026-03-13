@@ -7,6 +7,7 @@ Fill in the TODO sections to implement core layers using Triton kernels
 """
 
 import math
+import sys
 from typing import Optional, Tuple
 
 import numpy as np
@@ -14,6 +15,21 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
+
+
+def _detect_gpu_tier():
+    """Detect GPU shared memory tier. Returns 'datacenter' or 'consumer'."""
+    if not torch.cuda.is_available():
+        return 'consumer'
+    try:
+        props = torch.cuda.get_device_properties(0)
+        if props.max_shared_memory_size_per_block > 120 * 1024:
+            return 'datacenter'
+    except Exception:
+        pass
+    return 'consumer'
+
+_GPU_TIER = _detect_gpu_tier()
 
 
 # ============================================================================
@@ -1004,7 +1020,11 @@ class MLP:
     """MLP with SwiGLU gating using Triton."""
 
     FUSED = True
-    TILE_M, TILE_N, TILE_K = 64, 64, 32
+    # Runtime GPU detection: datacenter GPUs get larger tiles
+    if _GPU_TIER == 'datacenter':
+        TILE_M, TILE_N, TILE_K = 128, 128, 64
+    else:
+        TILE_M, TILE_N, TILE_K = 64, 64, 32
 
     def __init__(
         self,
@@ -1132,7 +1152,10 @@ class EncoderMLP:
     """Encoder MLP (no gating) using Triton."""
 
     FUSED = True
-    TILE_M, TILE_N, TILE_K = 64, 64, 32
+    if _GPU_TIER == 'datacenter':
+        TILE_M, TILE_N, TILE_K = 128, 128, 64
+    else:
+        TILE_M, TILE_N, TILE_K = 64, 64, 32
 
     def __init__(
         self,

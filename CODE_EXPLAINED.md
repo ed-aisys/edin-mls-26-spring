@@ -375,8 +375,13 @@ class TextDecoder:
     norm: RMSNorm(2048)
 ```
 
-**No KV cache infrastructure** in origin/main. Each forward pass processes the
-full input sequence.
+**KV cache infrastructure exists** in origin/main but is NOT used by `generate()`:
+- `TextDecoderLayer.forward_with_kv_buffer()` (line 318)
+- `TextDecoder.forward_with_kv_buffers()` (line 492)
+- `TextDecoder.allocate_kv_buffers()` (line 534)
+
+The stock `generate()` ignores these methods — each forward pass processes the
+full input sequence. `generate_v8b` (monkey-patched from layers.py) uses them.
 
 ### 5.4 DecoderLayer
 
@@ -391,8 +396,9 @@ Each decoder layer:
 
 ### 5.5 Generation Pipeline
 
-**`generate()`** is the ONLY generation method (no `generate_v8b`/`v8`/`v6`).
-It uses **O(n²) decode** — reprocesses the full growing sequence each step:
+**`generate()`** is the stock generation method in model.py — O(n²) decode.
+`generate_v8b` is monkey-patched from layers.py (see Section 10).
+Stock generate() reprocesses the full growing sequence each step:
 
 ```python
 def generate(self, input_features, input_ids=None, ...):
@@ -442,14 +448,17 @@ Downloads pre-trained weights from HuggingFace and maps them to our model.
 ```python
 # benchmark_student.py checks for optimized generate methods:
 if hasattr(model, 'generate_v8b'):
-    generate_fn = model.generate_v8b    # Not available in origin/main
+    generate_fn = model.generate_v8b    # Monkey-patched from layers.py (KV-cached, O(n))
 elif hasattr(model, 'generate_v8'):
-    generate_fn = model.generate_v8     # Not available in origin/main
+    generate_fn = model.generate_v8     # Not available
 elif hasattr(model, 'generate_v6'):
-    generate_fn = model.generate_v6     # Not available in origin/main
+    generate_fn = model.generate_v6     # Not available
 else:
-    generate_fn = model.generate        # <-- This is what runs (stock O(n²))
+    generate_fn = model.generate        # Stock O(n²) from model.py
 ```
+
+When `generate_v8b` is monkey-patched onto GlmAsrModel (via `_try_patch_v8b()` in
+layers.py), the benchmark automatically detects and uses it.
 
 ### Accuracy Check
 ```python
@@ -459,10 +468,10 @@ def check_transcription(transcription, expected):
     # Pass if > 80% word overlap
 ```
 
-### Current Benchmark (RTX 5090, 2026-03-12)
-- `120.7ms (+/- 0.2ms)` average, stock `generate()`
-- `9.29 ms/token`, 13 tokens generated
-- `100.0%` transcription accuracy
+### Current Benchmark (RTX 5090, 2026-03-13)
+- With generate_v8b: `113.5ms (+/- 0.1ms)`, `8.73 ms/token`
+- Without generate_v8b: `120.7ms (+/- 0.2ms)`, `9.29 ms/token`
+- 13 tokens generated, `100.0%` transcription accuracy
 
 ---
 
@@ -576,16 +585,24 @@ Optimizations adopted or planned from analysis of other branches:
 | Fused Q+K RoPE pair kernel | **meave** | **-14ms** (138→124ms) |
 | bf16 RMSNorm output kernel | **meave** (adapted for bf16) | **-3ms** (124→121ms) |
 
+### Adopted (2026-03-13)
+| Optimization | Source | Actual Impact |
+|-------------|--------|---------------|
+| bf16 LayerNorm output | internal | **-0.7ms** (encoder norm stores bf16 directly) |
+| generate_v8b (KV cache) | internal | **-7.6ms** (monkey-patched from layers.py) |
+| Runtime GPU detection | internal | portability (detect shared mem tier at import) |
+
 ### Rejected (tested, did not help on RTX 5090)
 | Optimization | Source | Result |
 |-------------|--------|--------|
 | SwiGLU grid swizzling | **yash/optimize** | +18ms regression with GROUP_SIZE_M=8, 1D grid |
 | @triton.autotune GELU/SiLU | **majed** | +0.7ms tuning overhead |
+| @triton.autotune Flash Attention | internal | Massive regression — seq_k changes every decode step with KV cache |
+| @triton.autotune SwiGLU | internal | Regression — wrapper overhead dominates small decode matmuls |
 
 ### Not Applicable
 | Optimization | Source | Why Not |
 |-------------|--------|---------|
 | EncoderMLP.FUSED | yash/optimize | model.py (origin/main) doesn't use EncoderMLP class |
 | LinearGELU.FUSED | yash/optimize | model.py (origin/main) doesn't use LinearGELU class |
-| flash_decode_kernel | meave | No KV cache in origin/main generate() |
-| generate_v8b | origin/ankush | Not in origin/main model.py |
+| flash_decode_kernel | meave | generate_v8b uses same flash_attention_kernel for decode |

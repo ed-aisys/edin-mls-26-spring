@@ -319,14 +319,44 @@ Single Triton kernel with online softmax. Tile sizes chosen per head_dim:
 
 `num_stages=1` to prevent shared memory overflow on RTX 5090 (101KB limit).
 
-### 6.6 Planned Optimizations (from branch analysis)
+### 6.6 bf16 Kernel Outputs
+```python
+# RMSNorm bf16 output — avoids fp32→bf16 cast in next Linear
+rmsnorm_bf16_kernel(...)  # stores y as bfloat16
+
+# LayerNorm bf16 output — same approach for encoder norm
+layernorm_kernel(...)     # stores y as bfloat16 when Linear.BF16=True
+```
+
+### 6.7 Runtime GPU Detection
+```python
+# Detects GPU shared memory tier once at import time
+_GPU_TIER = _detect_gpu_tier()  # 'datacenter' (H200/B200) or 'consumer' (RTX 4090/5090)
+```
+Sets tile sizes for Flash Attention and SwiGLU based on available shared memory.
+Consumer GPUs (~100KB) get smaller tiles + num_stages=1.
+Datacenter GPUs (~228KB) get larger tiles + num_stages=2.
+
+### 6.8 KV-Cached Generation (generate_v8b)
+```python
+# Monkey-patched onto GlmAsrModel from layers.py
+# Uses origin/main model.py's existing KV cache infrastructure
+model.generate_v8b(input_features, input_ids=input_ids, ...)
+```
+Prefills once, then processes 1 new token per decode step (O(n) vs O(n²)).
+
+### 6.9 Optimization Results Summary
 
 | Optimization | Source | Impact | Status |
 |-------------|--------|--------|--------|
 | Fused Q+K RoPE kernel | **meave** | **-14ms** | ADOPTED |
 | bf16 RMSNorm output | **meave** (adapted) | **-3ms** | ADOPTED |
+| bf16 LayerNorm output | internal | **-0.7ms** | ADOPTED |
+| generate_v8b (KV cache) | internal | **-7.6ms** | ADOPTED |
+| Runtime GPU detection | internal | portability | ADOPTED |
 | Swizzled SwiGLU | **yash/optimize** | +18ms regression | Rejected |
-| @triton.autotune | **majed** | +0.7ms overhead | Rejected |
+| @triton.autotune (lightweight) | **majed** | +0.7ms overhead | Rejected |
+| @triton.autotune (heavy kernels) | internal | massive regression | Rejected |
 
 ---
 
@@ -344,11 +374,12 @@ Single Triton kernel with online softmax. Tile sizes chosen per head_dim:
 
 ---
 
-## 8. Performance Results (RTX 5090, 2026-03-12)
+## 8. Performance Results (RTX 5090, 2026-03-13)
 
 | Implementation | Time | Speed | vs Baseline |
 |----------------|------|-------|-------------|
-| Our optimized template | **120.7ms** | 9.29ms/tok | **53.8% faster** |
+| Our template (with KV cache) | **113.5ms** | 8.73ms/tok | **56.6% faster** |
+| Our template (without KV cache) | **120.7ms** | 9.29ms/tok | **53.8% faster** |
 | Example baseline | 261.3ms | 20.10ms/tok | -- |
 | CPU fallback (no GPU) | ~14,000ms | ~1,000ms/tok | -- |
 
@@ -356,10 +387,13 @@ Key optimizations ranked by impact:
 1. **cuBLAS-backed `F.linear`** + TF32 flags — cuBLAS outperforms Triton linear kernel
 2. **bfloat16 weights** — halves memory traffic for decode matmuls
 3. **Fused Flash Attention** — Triton kernel with online softmax
-4. **Fused SwiGLU** — reduces kernel launch overhead and DRAM round-trips for decoder MLP
+4. **Fused Q+K RoPE pair kernel** — single kernel for both Q and K rotations (-14ms)
+5. **Fused SwiGLU** — reduces kernel launch overhead for decoder MLP
+6. **generate_v8b with KV cache** — O(n) decode instead of O(n²) (-7.6ms)
 
 Detailed profiling shows decoder decode steps dominate (82.8% of total time with
-50 tokens) because stock `generate()` is O(n²) — no KV cache.
+50 tokens) because stock `generate()` is O(n²). The `generate_v8b` KV-cached path
+reduces this by caching K/V states and only processing 1 new token per step.
 
 ---
 

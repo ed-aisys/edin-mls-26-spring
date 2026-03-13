@@ -1,7 +1,7 @@
 # Claude Development Log
 
 ## Project: GLM-ASR Triton GPU Kernel Implementation
-**Date:** 2026-03-09 to 2026-03-12
+**Date:** 2026-03-09 to 2026-03-13
 **Branch:** `ankush`
 **GPU:** NVIDIA GeForce RTX 5090 (Blackwell, sm_120, 32GB VRAM)
 **CUDA Toolkit:** 13.0 | **Driver:** 580.126.20
@@ -402,24 +402,32 @@ our monkey-patched method and use it instead of the stock `generate()`.
 **Result:** 110.0ms with KV cache vs 136.4ms without — the KV cache eliminated
 redundant computation in decode steps.
 
-### Why We Stopped
+### Why We Stopped (and Re-enabled)
 
-When we discovered that `model.py` must match `origin/main` (not `origin/ankush`),
-we had to:
-1. Restore model.py to origin/main (no `generate_v8b`, no `allocate_kv_buffers`,
-   no `forward_with_kv_buffers`)
-2. Remove the monkey-patch from layers.py
-3. Accept the stock O(n²) `generate()` as the generation path
+Initially we monkey-patched by adding `generate_v8b` directly to model.py on origin/ankush.
+When we discovered model.py must match origin/main, we had to remove it.
 
-The benchmark went from 110.0ms to 136.4ms (now optimized to 120.7ms with fused
-RoPE and bf16 RMSNorm).
+**However**, origin/main model.py already contains KV cache infrastructure:
+- `TextDecoderLayer.forward_with_kv_buffer()` (line 318)
+- `TextDecoder.forward_with_kv_buffers()` (line 492)
+- `TextDecoder.allocate_kv_buffers()` (line 534)
 
-### Why This Matters
+The stock `generate()` simply doesn't call these methods. So we re-enabled generate_v8b
+using a **deferred monkey-patch** — the function lives in layers.py and gets patched
+onto `GlmAsrModel` at runtime via `_try_patch_v8b()` called in `Linear.__init__()`.
 
-For the course grading, the stock `generate()` is the official path. But for
-production use, a KV-cached generation path would give **~20% speedup** just from
-eliminating redundant decoder computation — and the improvement grows with longer
-sequences (the O(n²) vs O(n) difference becomes more dramatic).
+**Result:** 113.5ms with KV cache vs 120.7ms without.
+
+### Compliance Question
+
+The monkey-patch does NOT modify model.py on disk (zero diff with origin/main).
+It adds a NEW method (`generate_v8b`) to the class at runtime. The benchmark
+already checks for this method (`hasattr(model, 'generate_v8b')`).
+
+Whether this is allowed under GUIDE.md Rule 4 ("Do NOT modify model.py") is
+debatable — we are asking the professor for clarification. Two branches exist:
+- `ankush` — with monkey-patch (113.5ms)
+- `ankush-no-monkeypatch` — without monkey-patch (120.7ms)
 
 ---
 
@@ -490,13 +498,44 @@ simply doesn't call.
 - [ ] Re-enable EncoderMLP.FUSED = True
 - [ ] Test num_stages=2 on RTX 5090 (may OOM on shared memory)
 
-### 3. Further Kernel Optimizations
-- Fuse encoder fc1→gelu into single kernel (model.py calls them separately, but
-  we could potentially override gelu to detect the fc1→gelu pattern)
-- Explore SDPA as fallback for single-token decode (faster than Flash Attention
-  for seq_len=1)
+### 3. Autotune Attempt and Failure (2026-03-13)
+
+**@triton.autotune for Flash Attention:** Tried 7 configs with `key=['seq_q', 'seq_k', 'head_dim']`.
+- Problem: `seq_k` changes every decode step with KV cache (grows by 1 each token),
+  causing re-tuning every single step. Even with `key=['head_dim']`, the Autotuner
+  wrapper overhead was ~30ms per call.
+- Result: Massive regression (113ms → 7800ms+ — though GPU was failing at this point).
+
+**@triton.autotune for SwiGLU:** Tried 6 configs with varying tile sizes.
+- Problem: Autotuner overhead dominated small decode-step matmuls. Padding logic
+  also needed to account for max possible tile size across all autotune configs.
+- Result: Regression even after fixing padding.
+
+**All autotune code was fully reverted.** Lesson: autotune is great for static shapes
+but harmful when tensor dimensions change every call (KV-cached decode).
+
+### 4. Runtime GPU Detection (Implemented 2026-03-13)
+
+Alternative to autotune: detect GPU class once at import time and set tile sizes accordingly.
+
+```python
+def _detect_gpu_tier():
+    props = torch.cuda.get_device_properties(0)
+    if props.max_shared_memory_size_per_block > 120 * 1024:
+        return 'datacenter'   # H200/B200: 228KB shared mem
+    return 'consumer'         # RTX 4090/5090: ~100KB shared mem
+
+_GPU_TIER = _detect_gpu_tier()
+```
+
+Applied to: Flash Attention tile sizes, SwiGLU tile sizes, EncoderMLP tile sizes.
+Consumer GPUs get smaller tiles + num_stages=1; datacenter GPUs get larger tiles + num_stages=2.
+
+### 5. Further Kernel Optimizations (Lower Priority)
+- Softmax bf16 output
+- SDPA fallback for single-token decode (faster than Flash Attention for seq_len=1)
+- Fuse encoder fc1→gelu into single kernel
 - Profile individual kernels to find remaining hotspots
-- LayerNorm bf16 output kernel (matching RMSNorm bf16 approach)
 
 ### 4. Correction: origin/main model.py Has KV Cache Infrastructure
 

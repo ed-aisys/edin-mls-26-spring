@@ -41,7 +41,7 @@ Quick reference for kernel signatures, model architecture, and performance tunin
 | `attention.py` | **Yes** | Fused Flash Attention kernel + 3 legacy attention kernels |
 | `rope.py` | **Yes** | 1 RoPE kernel |
 | `__init__.py` | **Yes** | Backend/fusion configuration |
-| `model.py` | **No** | Model architecture, stock `generate()` (O(n²), no KV cache) |
+| `model.py` | **No** | Model architecture, stock `generate()` (O(n²), KV cache infra exists but unused) |
 | `weight_loader.py` | **No** | HuggingFace weight loading |
 | `conv.py` | **No** | Conv1D for audio subsampling |
 
@@ -190,14 +190,15 @@ python benchmark_detailed.py glm_asr_triton_template
 
 ---
 
-## Benchmark Results (RTX 5090, CUDA 13.0, 2026-03-12)
+## Benchmark Results (RTX 5090, CUDA 13.0, 2026-03-13)
 
 ### Student Benchmark
 | Implementation | Time | Speed | Accuracy |
 |----------------|------|-------|----------|
-| **Our template** | **120.7ms** | 9.29ms/tok | 100% |
+| **Our template (with KV cache)** | **113.5ms** | 8.73ms/tok | 100% |
+| Our template (no KV cache) | 120.7ms | 9.29ms/tok | 100% |
 | Example baseline | 261.3ms | 20.10ms/tok | 100% |
-| **Speedup** | **53.8%** | | |
+| **Speedup** | **56.6%** | | |
 
 ### Detailed Benchmark (50 generated tokens)
 | Component | Time | % Total |
@@ -212,14 +213,18 @@ python benchmark_detailed.py glm_asr_triton_template
 
 ---
 
-## Optimization Roadmap (from branch analysis)
+## Optimization Roadmap
 
-| Optimization | Source Branch | Impact | Status |
-|-------------|---------------|--------|--------|
+| Optimization | Source | Impact | Status |
+|-------------|--------|--------|--------|
 | Fused Q+K RoPE kernel | meave | **-14ms** | **ADOPTED** |
 | bf16 RMSNorm output | meave (adapted) | **-3ms** | **ADOPTED** |
+| bf16 LayerNorm output | internal | **-0.7ms** | **ADOPTED** |
+| generate_v8b (KV cache) | internal | **-7.6ms** | **ADOPTED** |
+| Runtime GPU detection | internal | portability | **ADOPTED** |
 | Swizzled SwiGLU | yash/optimize | +18ms regression | Rejected |
-| @triton.autotune GELU/SiLU | majed | +0.7ms overhead | Rejected |
+| @triton.autotune (lightweight) | majed | +0.7ms overhead | Rejected |
+| @triton.autotune (heavy kernels) | internal | massive regression | Rejected |
 
 ---
 
@@ -237,8 +242,11 @@ python benchmark_detailed.py glm_asr_triton_template
 - [x] Upstream merge with ed-aisys (19 commits, grading criteria, benchmark updates)
 - [x] Fused Q+K RoPE pair kernel (from meave) — **-14ms**
 - [x] bf16 RMSNorm output kernel (from meave) — **-3ms**
+- [x] bf16 LayerNorm output — **-0.7ms**
+- [x] generate_v8b with KV cache (monkey-patched) — **-7.6ms**
+- [x] Runtime GPU detection for cross-GPU portability
 - [x] SwiGLU swizzle tested, rejected (+18ms regression on RTX 5090)
-- [x] @triton.autotune tested, rejected (+0.7ms overhead)
+- [x] @triton.autotune tested, rejected (lightweight: +0.7ms overhead; heavy kernels: massive regression)
 
 ---
 

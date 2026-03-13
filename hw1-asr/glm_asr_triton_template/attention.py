@@ -14,6 +14,27 @@ import triton.language as tl
 from typing import Optional, Tuple
 
 
+def _detect_gpu_tier():
+    """Detect GPU shared memory tier at import time.
+    Returns 'datacenter' for H200/B200 (228KB smem) or 'consumer' for 4090/5090 (~100KB)."""
+    if not torch.cuda.is_available():
+        return 'consumer'
+    try:
+        sm_major = torch.cuda.get_device_capability(0)[0]
+        # Hopper (sm_90) datacenter has 228KB; Blackwell consumer (sm_120) has 101KB
+        # Both sm_90 (H100/H200) and sm_100 (B200 datacenter) have large shared memory
+        # Consumer Blackwell (sm_120, RTX 5090) has ~101KB
+        props = torch.cuda.get_device_properties(0)
+        smem_per_block = props.max_shared_memory_size_per_block  # bytes
+        if smem_per_block > 120 * 1024:  # >120KB = datacenter class
+            return 'datacenter'
+    except Exception:
+        pass
+    return 'consumer'
+
+_GPU_TIER = _detect_gpu_tier()
+
+
 def get_stream():
     """Get current CUDA stream pointer."""
     if torch.cuda.is_available():
@@ -454,16 +475,20 @@ def scaled_dot_product_attention(
             (BH, seq_q, head_dim), dtype=torch.float32, device=q.device
         )
 
-        # Choose tile sizes based on head_dim to stay within shared memory (101KB limit)
+        # Choose tile sizes based on GPU tier and head_dim
         BLOCK_D = head_dim_padded
-        if head_dim <= 64:
-            # Encoder: 20 heads, head_dim=64, seq~175
-            BLOCK_M = 128
-            BLOCK_N = 64
+        if _GPU_TIER == 'datacenter':
+            # H200/B200: 228KB shared mem → larger tiles, more pipeline stages
+            if head_dim <= 64:
+                BLOCK_M, BLOCK_N, nstages, nwarps = 128, 128, 2, 8
+            else:
+                BLOCK_M, BLOCK_N, nstages, nwarps = 128, 64, 2, 8
         else:
-            # Decoder: 16 heads, head_dim=128
-            BLOCK_M = 64
-            BLOCK_N = 32
+            # RTX 4090/5090: ~100KB shared mem → conservative tiles
+            if head_dim <= 64:
+                BLOCK_M, BLOCK_N, nstages, nwarps = 128, 64, 1, 4
+            else:
+                BLOCK_M, BLOCK_N, nstages, nwarps = 64, 32, 1, 4
 
         grid = (triton.cdiv(seq_q, BLOCK_M), BH)
         flash_attention_kernel[grid](
@@ -481,7 +506,8 @@ def scaled_dot_product_attention(
             BLOCK_M=BLOCK_M,
             BLOCK_N=BLOCK_N,
             BLOCK_D=BLOCK_D,
-            num_stages=1,
+            num_stages=nstages,
+            num_warps=nwarps,
         )
 
         return output.reshape(batch, num_heads, seq_q, head_dim).to(q.dtype)
