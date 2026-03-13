@@ -180,6 +180,90 @@ def next_power_of_two(x: int) -> int:
 MAX_ROPE_DIM = 256
 
 
+# ============================================================================
+# Fused RoPE Pair Kernel (from meave branch — single launch for Q+K)
+# ============================================================================
+
+@triton.jit
+def fused_rope_pair_kernel(
+    q_ptr,          # query  (B*Hq, S, D)
+    k_ptr,          # key    (B*Hk, S, D)
+    cos_ptr,        # cos    (S, half_dim)
+    sin_ptr,        # sin    (S, half_dim)
+    qo_ptr,         # q out  (B*Hq, S, D)
+    ko_ptr,         # k out  (B*Hk, S, D)
+    half_dim,
+    head_dim,
+    seq_len,
+    total_qh,       # B * num_q_heads
+    total_kh,       # B * num_kv_heads
+    stride_qs, stride_qd,
+    stride_ks, stride_kd,
+    stride_cs, stride_cd,
+    stride_qos, stride_qod,
+    stride_kos, stride_kod,
+    BLOCK_HD: tl.constexpr,
+):
+    """
+    Fused RoPE kernel that processes BOTH Q and K in a single grid launch.
+    Grid: ((total_qh + total_kh) * seq_len,)
+    Programs 0..total_qh*seq_len-1 handle Q, the rest handle K.
+    """
+    pid = tl.program_id(0)
+    total_q_programs = total_qh * seq_len
+
+    is_q = pid < total_q_programs
+
+    if is_q:
+        bh = pid // seq_len
+        s = pid % seq_len
+        x_ptr = q_ptr
+        o_ptr = qo_ptr
+        stride_s = stride_qs
+        stride_d = stride_qd
+        stride_os_val = stride_qos
+        stride_od_val = stride_qod
+        stride_bh = stride_qs * seq_len
+        stride_obh = stride_qos * seq_len
+    else:
+        local_pid = pid - total_q_programs
+        bh = local_pid // seq_len
+        s = local_pid % seq_len
+        x_ptr = k_ptr
+        o_ptr = ko_ptr
+        stride_s = stride_ks
+        stride_d = stride_kd
+        stride_os_val = stride_kos
+        stride_od_val = stride_kod
+        stride_bh = stride_ks * seq_len
+        stride_obh = stride_kos * seq_len
+
+    offs_half = tl.arange(0, BLOCK_HD)
+    mask_half = offs_half < half_dim
+
+    base = bh * stride_bh + s * stride_s
+    x1 = tl.load(x_ptr + base + offs_half * stride_d, mask=mask_half, other=0.0).to(tl.float32)
+    x2 = tl.load(x_ptr + base + (offs_half + half_dim) * stride_d, mask=mask_half, other=0.0).to(tl.float32)
+
+    cos_val = tl.load(cos_ptr + s * stride_cs + offs_half * stride_cd, mask=mask_half, other=1.0).to(tl.float32)
+    sin_val = tl.load(sin_ptr + s * stride_cs + offs_half * stride_cd, mask=mask_half, other=0.0).to(tl.float32)
+
+    out1 = x1 * cos_val - x2 * sin_val
+    out2 = x2 * cos_val + x1 * sin_val
+
+    obase = bh * stride_obh + s * stride_os_val
+    tl.store(o_ptr + obase + offs_half * stride_od_val, out1, mask=mask_half)
+    tl.store(o_ptr + obase + (offs_half + half_dim) * stride_od_val, out2, mask=mask_half)
+
+    # Copy passthrough dimensions (for partial RoPE in audio encoder)
+    remaining = head_dim - 2 * half_dim
+    if remaining > 0:
+        offs_rest = tl.arange(0, BLOCK_HD)
+        mask_rest = offs_rest < remaining
+        rest_in = tl.load(x_ptr + base + (2 * half_dim + offs_rest) * stride_d, mask=mask_rest, other=0.0)
+        tl.store(o_ptr + obase + (2 * half_dim + offs_rest) * stride_od_val, rest_in, mask=mask_rest)
+
+
 def _apply_rope_single(
     x: torch.Tensor,
     cos: torch.Tensor,
@@ -187,7 +271,7 @@ def _apply_rope_single(
     half_dim: int,
     head_dim: int,
 ) -> torch.Tensor:
-    """Apply RoPE to a single tensor (Q or K) using Torch."""
+    """Apply RoPE to a single tensor (Q or K) using Torch (CPU fallback)."""
     batch, num_heads, seq_len, _ = x.shape
 
     cos = cos[:seq_len]
@@ -217,6 +301,7 @@ def apply_rotary_pos_emb(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary position embeddings.
+    On CUDA, uses a single fused Triton kernel launch for both Q and K (from meave branch).
     """
     batch, num_q_heads, seq_len, head_dim = q.shape
     _, num_kv_heads, _, _ = k.shape
@@ -230,9 +315,59 @@ def apply_rotary_pos_emb(
         cos = cos[:, :half_dim]
         sin = sin[:, :half_dim]
 
-    cos = cos.to(torch.float32).contiguous()
-    sin = sin.to(torch.float32).contiguous()
+    if cos.dtype != torch.float32:
+        cos = cos.to(torch.float32)
+    if not cos.is_contiguous():
+        cos = cos.contiguous()
+    if sin.dtype != torch.float32:
+        sin = sin.to(torch.float32)
+    if not sin.is_contiguous():
+        sin = sin.contiguous()
 
+    # CUDA fast path: single fused kernel for both Q and K (from meave branch)
+    if q.is_cuda:
+        total_qh = batch * num_q_heads
+        total_kh = batch * num_kv_heads
+        BLOCK_HD = next_power_of_two(max(half_dim, head_dim - 2 * half_dim, 1))
+
+        q_flat = q.reshape(total_qh, seq_len, head_dim)
+        if not q_flat.is_contiguous():
+            q_flat = q_flat.contiguous()
+        k_flat = k.reshape(total_kh, seq_len, head_dim)
+        if not k_flat.is_contiguous():
+            k_flat = k_flat.contiguous()
+        qo_flat = torch.empty_like(q_flat)
+        ko_flat = torch.empty_like(k_flat)
+
+        cos_half = cos[:seq_len]
+        if not cos_half.is_contiguous():
+            cos_half = cos_half.contiguous()
+        sin_half = sin[:seq_len]
+        if not sin_half.is_contiguous():
+            sin_half = sin_half.contiguous()
+
+        total_programs = (total_qh + total_kh) * seq_len
+        fused_rope_pair_kernel[(total_programs,)](
+            q_flat, k_flat,
+            cos_half, sin_half,
+            qo_flat, ko_flat,
+            half_dim, head_dim, seq_len,
+            total_qh, total_kh,
+            q_flat.stride(1), q_flat.stride(2),
+            k_flat.stride(1), k_flat.stride(2),
+            cos_half.stride(0), cos_half.stride(1),
+            qo_flat.stride(1), qo_flat.stride(2),
+            ko_flat.stride(1), ko_flat.stride(2),
+            BLOCK_HD=BLOCK_HD,
+            num_stages=1,
+            num_warps=4,
+        )
+
+        q_out = qo_flat.reshape(batch, num_q_heads, seq_len, head_dim)
+        k_out = ko_flat.reshape(batch, num_kv_heads, seq_len, head_dim)
+        return q_out.to(q.dtype), k_out.to(k.dtype)
+
+    # CPU fallback
     q_out = _apply_rope_single(q, cos, sin, half_dim, head_dim)
     k_out = _apply_rope_single(k, cos, sin, half_dim, head_dim)
 

@@ -16,9 +16,10 @@ Quick reference for kernel signatures, model architecture, and performance tunin
 | | Norm | LayerNorm |
 | | Activation | GELU |
 | | RoPE | 50% partial (rotary_dim=32) |
+| | MLP | Plain `fc1 → gelu → fc2` (not EncoderMLP class) |
 | **Projector** | Pool factor | 4 |
 | | Hidden | 5120 -> 4096 -> 2048 |
-| | Uses | LinearGELU + Linear |
+| | Uses | Plain `Linear → gelu → Linear` (not LinearGELU class) |
 | **Text Decoder** | Hidden size | 2048 |
 | | Q heads | 16 |
 | | KV heads | 4 (GQA, 4:1 ratio) |
@@ -40,7 +41,7 @@ Quick reference for kernel signatures, model architecture, and performance tunin
 | `attention.py` | **Yes** | Fused Flash Attention kernel + 3 legacy attention kernels |
 | `rope.py` | **Yes** | 1 RoPE kernel |
 | `__init__.py` | **Yes** | Backend/fusion configuration |
-| `model.py` | **No** | Model architecture, KV-cached generation (`generate_v8b`) |
+| `model.py` | **No** | Model architecture, stock `generate()` (O(n²), no KV cache) |
 | `weight_loader.py` | **No** | HuggingFace weight loading |
 | `conv.py` | **No** | Conv1D for audio subsampling |
 
@@ -76,7 +77,6 @@ softmax_kernel(x_ptr, y_ptr, stride_x, stride_y, n_cols, BLOCK_SIZE)
 
 ```python
 # Flash Attention (PRIMARY) — Grid: (cdiv(seq_q, BLOCK_M), batch_heads)
-# Fused online softmax: single kernel, no DRAM scores matrix
 flash_attention_kernel(q_ptr, k_ptr, v_ptr, o_ptr, mask_ptr, scale,
                        seq_q, seq_k, head_dim,
                        stride_qb..qd, stride_kb..kd, stride_vb..vd,
@@ -84,17 +84,13 @@ flash_attention_kernel(q_ptr, k_ptr, v_ptr, o_ptr, mask_ptr, scale,
                        IS_CAUSAL, HAS_MASK, BLOCK_M, BLOCK_N, BLOCK_D)
 
 # Legacy: Attention Scores — Grid: (batch_heads, seq_q)
-attention_scores_kernel(q_ptr, k_ptr, scores_ptr, scale, seq_k, head_dim,
-                        stride_q0..q2, stride_k0..k2, stride_s0..s2,
-                        BLOCK_K, BLOCK_D)
+attention_scores_kernel(...)
 
 # Legacy: Softmax In-place — Grid: (batch_heads * seq_q,)
-softmax_inplace_kernel(scores_ptr, stride_s, seq_k, BLOCK_SIZE)
+softmax_inplace_kernel(...)
 
 # Legacy: Attention Output — Grid: (batch_heads, seq_q)
-attention_output_kernel(attn_ptr, v_ptr, output_ptr, seq_k, head_dim,
-                        stride_w0..w2, stride_v0..v2, stride_o0..o2,
-                        BLOCK_K, BLOCK_D)
+attention_output_kernel(...)
 ```
 
 ### rope.py
@@ -121,15 +117,15 @@ Conv2 output:        (1, 1280, T/2)        # Stride 2 + GELU
 Permute:             (1, T/2, 1280)        # (batch, seq, hidden)
 
 Encoder (32 layers):
-  Q/K/V proj:        (1, T/2, 1280)        # Linear
+  Q/K/V proj:        (1, T/2, 1280)        # Linear (cuBLAS bf16)
   Reshape:           (1, 20, T/2, 64)      # 20 heads, head_dim=64
   RoPE:              Partial (first 32 dims rotated)
-  Attention:         (1, 20, T/2, 64)      # Scaled dot-product
-  MLP (EncoderMLP):  (1, T/2, 1280) -> 5120 -> 1280  # GELU (fused when FUSED=True)
+  Attention:         (1, 20, T/2, 64)      # Flash Attention kernel
+  MLP:               fc1(x) → gelu(x) → fc2(x)  # Plain Linear + gelu, NOT fused
 
 Encoder output:      (1, T/2, 1280)
 Pool 4 frames:       (1, T/8, 5120)        # Concatenate 4 consecutive frames
-Projector:           (1, T/8, 2048)        # LinearGELU(5120->4096) + Linear(4096->2048)
+Projector:           (1, T/8, 2048)        # Linear→gelu→Linear (plain, NOT fused)
 
 Decoder input:       (1, N_tokens, 2048)   # Audio + text token embeddings
 Decoder (28 layers):
@@ -137,16 +133,14 @@ Decoder (28 layers):
   K/V proj:          (1, N, 512)           # 4 KV heads x 128 dim (GQA)
   Reshape Q:         (1, 16, N, 128)
   Reshape KV:        (1, 4, N, 128)
-  Attention:         (1, 16, N, 128)       # Flash Attention kernel (GQA via _expand_kv_heads)
-  MLP (SwiGLU):      (1, N, 2048) -> 6144 -> 2048
+  Attention:         (1, 16, N, 128)       # Flash Attention (GQA via _expand_kv_heads)
+  MLP (SwiGLU):      Fused when MLP.FUSED=True
 
 LM Head:             (1, N, 59264)         # Vocab logits
-Argmax:              next token ID
 
-KV-Cache Decode (generate_v8b in model.py):
-  Prefill:           Full sequence processed once, KV states cached
-  Each decode step:  (1, 1, 2048) input -> only new token processed
-  KV buffers:        Pre-allocated (batch, num_layers, heads, max_seq, head_dim)
+Stock generate() — O(n²) decode:
+  Each step: embed new token, concatenate to inputs_embeds, reprocess ALL through decoder
+  No KV cache — full sequence recomputed each step
 ```
 
 ---
@@ -155,93 +149,26 @@ KV-Cache Decode (generate_v8b in model.py):
 
 ### Backend Selection
 ```python
-# In __init__.py:
-layers.Linear.BACKEND = "torch"    # current config; F.linear -> cuBLAS/cuBLASLt
+layers.Linear.BACKEND = "torch"    # cuBLAS/cuBLASLt (current, fastest)
 layers.Linear.BACKEND = "triton"   # strict linear-kernel path
 
-# Fusion flags:
-layers.MLP.FUSED = True            # Fused SwiGLU (decoder MLP)
-layers.EncoderMLP.FUSED = True     # Fused Linear+GELU (encoder MLP — used by model.py)
-# LinearGELU.FUSED = False         # Disabled in layers.py (shared memory exceeds hardware limit)
+layers.MLP.FUSED = True            # Fused SwiGLU (decoder MLP) — EFFECTIVE
+layers.EncoderMLP.FUSED = True     # Set but NOT USED (model.py uses plain fc1/fc2)
+# LinearGELU.FUSED = False         # Set but NOT USED (model.py uses plain linear_1/act)
 ```
 
 ### bfloat16 Weights
 ```python
-# In layers.py (class-level default — can't rely on __init__.py during benchmarks):
-Linear.BF16 = True     # Caches bf16 weight copies, halves memory traffic
-Linear.BF16 = False    # Standard float32 path
+Linear.BF16 = True     # Class default in layers.py, halves memory traffic
 ```
-
-### Runtime Flags
-```python
-torch.set_float32_matmul_precision("high")
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-torch.backends.cudnn.benchmark = True
-```
-
-These are the current committed defaults in `__init__.py`.
 
 ### Flash Attention Configuration
 ```python
-# In attention.py:
-# Primary CUDA path: fused Triton Flash Attention kernel with online softmax
-# GQA handled via _expand_kv_heads before kernel call
 # Tile sizes chosen per head_dim to stay within 101KB shared memory
 if head_dim <= 64:   BLOCK_M, BLOCK_N = 128, 64  # Encoder
 else:                BLOCK_M, BLOCK_N = 64, 32    # Decoder
-flash_attention_kernel[grid](
-    q_flat, k_flat, v_flat, output, mask_flat, scale, ...,
-    IS_CAUSAL=is_causal, HAS_MASK=has_mask,
-    BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_D=head_dim_padded,
-    num_stages=1,
-)
+# num_stages=1 prevents double-buffering overflow
 ```
-
-### Attention Self-Test
-```bash
-cd hw1-asr/glm_asr_triton_template
-python attention.py
-```
-
-The current self-test is a deterministic 17-case parity suite. It prints the
-active device, warns if it is only exercising the CPU fallback path, and checks
-encoder-like ragged lengths, decoder-like prefill lengths, both mask layouts,
-GQA, single-token decode, decode with causal+mask, and non-power-of-two shapes.
-
-### Tile Sizes (in layers.py)
-```python
-# Linear layer tiles (used for Triton backend and fused kernels)
-Linear.TILE_M = 128    # Output tile rows
-Linear.TILE_N = 128    # Output tile columns
-Linear.TILE_K = 64     # Reduction tile
-
-# MLP fused kernel tiles
-MLP.TILE_M, MLP.TILE_N, MLP.TILE_K = 64, 64, 32
-EncoderMLP.TILE_M, EncoderMLP.TILE_N, EncoderMLP.TILE_K = 64, 64, 32
-```
-
----
-
-## KV-Cache Generation (in model.py — read-only)
-
-`model.py` natively includes `generate_v8b()` which uses pre-allocated KV buffers:
-
-```python
-# model.py — GlmAsrModel.generate_v8b()
-inputs_embeds, seed_tokens = self._prepare_generation_inputs(...)
-kv_buffers = self.text_decoder.allocate_kv_buffers(batch_size, max_len)
-hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(inputs_embeds, kv_buffers, 0)
-logits = self.lm_head(hidden[:, -1:, :])
-for _ in range(max_new_tokens):
-    next_token = self._sample_next_token(logits[:, -1, :] / temperature, ...)
-    next_embeds = self.text_decoder.embed_tokens(next_token)
-    hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(next_embeds, kv_buffers, cache_pos)
-    logits = self.lm_head(hidden[:, -1:, :])
-```
-
-`generate()` delegates to `generate_v8b()` by default. `benchmark_student.py`
-also checks `hasattr(model, 'generate_v8b')` and uses it when available.
 
 ---
 
@@ -249,14 +176,9 @@ also checks `hasattr(model, 'generate_v8b')` and uses it when available.
 
 ```bash
 cd hw1-asr
-
-# If model cache is on overlay with limited space:
 export HF_HOME=/workspace/.hf_cache
 
-# Quick correctness test
-python benchmark_student.py glm_asr_triton_template --warmup 1 --runs 1
-
-# Full benchmark
+# Student benchmark
 python benchmark_student.py glm_asr_triton_template --warmup 2 --runs 5
 
 # Baseline comparison
@@ -268,13 +190,36 @@ python benchmark_detailed.py glm_asr_triton_template
 
 ---
 
-## Benchmark Results (RTX 5090, CUDA 13.0)
+## Benchmark Results (RTX 5090, CUDA 13.0, 2026-03-12)
 
+### Student Benchmark
 | Implementation | Time | Speed | Accuracy |
 |----------------|------|-------|----------|
-| **Our template** | **110.0ms** | 8.46ms/tok | 100% |
+| **Our template** | **120.7ms** | 9.29ms/tok | 100% |
 | Example baseline | 261.3ms | 20.10ms/tok | 100% |
-| **Speedup** | **57.9%** | | |
+| **Speedup** | **53.8%** | | |
+
+### Detailed Benchmark (50 generated tokens)
+| Component | Time | % Total |
+|-----------|------|---------|
+| Audio Encoder | 202.09ms | 8.7% |
+| Projector | 4.14ms | 0.2% |
+| Decoder Prefill | 191.59ms | 8.3% |
+| **Decoder Decode (50 steps)** | **1919.94ms** | **82.8%** |
+| **Total** | **2317.76ms** | 100% |
+
+**Key bottleneck:** Decoder decode dominates because stock `generate()` is O(n²).
+
+---
+
+## Optimization Roadmap (from branch analysis)
+
+| Optimization | Source Branch | Impact | Status |
+|-------------|---------------|--------|--------|
+| Fused Q+K RoPE kernel | meave | **-14ms** | **ADOPTED** |
+| bf16 RMSNorm output | meave (adapted) | **-3ms** | **ADOPTED** |
+| Swizzled SwiGLU | yash/optimize | +18ms regression | Rejected |
+| @triton.autotune GELU/SiLU | majed | +0.7ms overhead | Rejected |
 
 ---
 
@@ -282,38 +227,37 @@ python benchmark_detailed.py glm_asr_triton_template
 
 - [x] All 10 kernels implemented and passing tests
 - [x] Correct transcription output (100% word accuracy)
-- [x] Tile/block sizes tuned (tested multiple configs)
-- [x] Fused SwiGLU active for decoder MLP
-- [x] Fused EncoderMLP active for encoder layers
-- [x] LinearGELU fusion disabled (shared memory limit)
+- [x] Fused SwiGLU active for decoder MLP (`MLP.FUSED = True`)
 - [x] Linear backend optimized (cuBLAS selected as fastest)
-- [x] TF32 runtime flags enabled in `__init__.py`
-- [x] GQA path optimized — `_expand_kv_heads` before Flash Attention kernel
-- [x] Activation block size 1024 (up from 256)
-- [x] bfloat16 weights — halves memory traffic for decode matmuls
-- [x] Fused Flash Attention — Triton kernel with online softmax, replaces SDPA and 3-kernel approach
-- [x] Flash Attention supports causal, attention_mask, and arbitrary seq lengths
-- [x] 17 deterministic numerical parity tests for Flash Attention, including ragged encoder/decode shapes and both mask layouts
-- [x] KV-cache generation — O(n) decode via native `generate_v8b` in model.py
-- [x] Total inference time < 200ms target (110.0ms achieved)
-- [x] model.py, conv.py, weight_loader.py all match origin/ankush (zero diff)
+- [x] TF32 runtime flags enabled
+- [x] bfloat16 weights — halves memory traffic
+- [x] Fused Flash Attention — Triton kernel with online softmax
+- [x] 17 deterministic numerical parity tests for Flash Attention
+- [x] model.py, conv.py, weight_loader.py all match origin/main (zero diff)
+- [x] Upstream merge with ed-aisys (19 commits, grading criteria, benchmark updates)
+- [x] Fused Q+K RoPE pair kernel (from meave) — **-14ms**
+- [x] bf16 RMSNorm output kernel (from meave) — **-3ms**
+- [x] SwiGLU swizzle tested, rejected (+18ms regression on RTX 5090)
+- [x] @triton.autotune tested, rejected (+0.7ms overhead)
 
 ---
 
 ## File Dependency Graph
 
 ```
-model.py (DO NOT MODIFY — includes generate_v8b with KV cache)
-  |-- layers.py (RMSNorm, LayerNorm, Linear, MLP, EncoderMLP, LinearGELU, Embedding, softmax, gelu, silu)
+model.py (DO NOT MODIFY — stock generate(), no KV cache)
+  |-- layers.py (RMSNorm, LayerNorm, Linear, MLP, EncoderMLP*, LinearGELU*, Embedding, softmax, gelu, silu)
   |-- attention.py (MultiHeadAttention, scaled_dot_product_attention)
   |-- rope.py (RotaryEmbedding, apply_rotary_pos_emb)
   |-- conv.py (Conv1d, Conv1dSubsampler) (DO NOT MODIFY)
   |-- weight_loader.py (load_model_from_hf) (DO NOT MODIFY)
 
+* EncoderMLP and LinearGELU classes exist in layers.py but model.py does NOT use them.
+  model.py uses plain Linear + gelu() for encoder MLP and projector.
+
 benchmark_student.py
   |-- model.py (via dynamic import)
   |-- weight_loader.py (downloads from HuggingFace)
-  |-- checks for generate_v8b/v8/v6 on model instance
 ```
 
 ---
@@ -322,23 +266,17 @@ benchmark_student.py
 
 - **Model ID:** `zai-org/GLM-ASR-Nano-2512`
 - **Size:** ~4.3GB (safetensors format)
-- **Auto-downloaded** by `weight_loader.py` on first run
 - **Cache:** `$HF_HOME` or `~/.cache/huggingface/`
 
 ## Test Audio
 
 - **File:** `hw1-asr/test_audio.wav`
 - **Expected output:** `CONCORD RETURNED TO ITS PLACE AMIDST THE TENTS`
-- **Sample rate:** 16kHz
 - **Duration:** ~3.5 seconds
 
 ## Troubleshooting: cuBLAS
 
-If you see `CUBLAS_STATUS_INVALID_VALUE` errors, you likely have a pip-installed
-`nvidia-cublas` package that conflicts with the system CUDA libraries:
+If you see `CUBLAS_STATUS_INVALID_VALUE`, pip-installed `nvidia-cublas` may conflict:
 ```bash
-pip list | grep nvidia-cublas
-# If version doesn't match your CUDA toolkit:
 pip uninstall nvidia-cublas
-# PyTorch will then use the system cuBLAS library
 ```

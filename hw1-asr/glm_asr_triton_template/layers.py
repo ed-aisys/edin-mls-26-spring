@@ -73,6 +73,35 @@ def rmsnorm_kernel(
 
 
 @triton.jit
+def rmsnorm_bf16_kernel(
+    x_ptr,
+    w_ptr,
+    y_ptr,
+    stride_x,
+    stride_y,
+    hidden_size,
+    eps,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """
+    RMSNorm with bf16 output (from meave branch, adapted for bf16).
+    Outputs bfloat16 directly, avoiding fp32→HBM→bf16 round-trip
+    when feeding into cuBLAS Linear layers.
+    """
+    pid = tl.program_id(0)
+    offs = tl.arange(0, BLOCK_SIZE)
+    mask = offs < hidden_size
+
+    x = tl.load(x_ptr + pid * stride_x + offs, mask=mask, other=0.0)
+    x = x.to(tl.float32)
+    var = tl.sum(x * x, axis=0) / hidden_size
+    x_norm = x * tl.rsqrt(var + eps)
+    w = tl.load(w_ptr + offs, mask=mask, other=0.0)
+    y = (x_norm * w).to(tl.bfloat16)
+    tl.store(y_ptr + pid * stride_y + offs, y, mask=mask)
+
+
+@triton.jit
 def layernorm_kernel(
     x_ptr,
     w_ptr,
@@ -109,11 +138,7 @@ def layernorm_kernel(
 
 @triton.jit
 def gelu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
-    """
-    GELU using tanh approximation.
-
-    *** TODO: Implement this kernel ***
-    """
+    """GELU using tanh approximation."""
     pid = tl.program_id(0)
     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offs < n_elements
@@ -128,11 +153,7 @@ def gelu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
 
 @triton.jit
 def silu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
-    """
-    SiLU/Swish: x * sigmoid(x)
-
-    *** TODO: Implement this kernel ***
-    """
+    """SiLU/Swish: x * sigmoid(x)."""
     pid = tl.program_id(0)
     offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offs < n_elements
@@ -530,19 +551,37 @@ class RMSNorm:
             x_flat = x.reshape(batch_size, self.hidden_size)
             if x_flat.dtype != torch.float32:
                 x_flat = x_flat.to(torch.float32)
-            output = torch.empty_like(x_flat)
             if self.weight.device != x.device:
                 self.weight = self.weight.to(x.device)
-            rmsnorm_kernel[(batch_size,)](
-                x_flat,
-                self.weight,
-                output,
-                x_flat.stride(0),
-                output.stride(0),
-                self.hidden_size,
-                self.eps,
-                BLOCK_SIZE=self._block,
-            )
+            # Use bf16 output kernel when Linear.BF16 is True (from meave branch)
+            if Linear.BF16:
+                output = torch.empty(
+                    (batch_size, self.hidden_size),
+                    dtype=torch.bfloat16,
+                    device=x.device,
+                )
+                rmsnorm_bf16_kernel[(batch_size,)](
+                    x_flat,
+                    self.weight,
+                    output,
+                    x_flat.stride(0),
+                    output.stride(0),
+                    self.hidden_size,
+                    self.eps,
+                    BLOCK_SIZE=self._block,
+                )
+            else:
+                output = torch.empty_like(x_flat)
+                rmsnorm_kernel[(batch_size,)](
+                    x_flat,
+                    self.weight,
+                    output,
+                    x_flat.stride(0),
+                    output.stride(0),
+                    self.hidden_size,
+                    self.eps,
+                    BLOCK_SIZE=self._block,
+                )
             return output.reshape(original_shape)
 
         x_float = x.to(torch.float32)

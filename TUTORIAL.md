@@ -50,7 +50,7 @@ hw1-asr/
     attention.py               <- 3 kernels to implement
     rope.py                    <- 1 kernel to implement
     __init__.py                <- Configuration (backend, fusion flags)
-    model.py                   <- DO NOT MODIFY (includes KV-cached generate_v8b)
+    model.py                   <- DO NOT MODIFY (stock generate, no KV cache)
     conv.py                    <- DO NOT MODIFY
     weight_loader.py           <- DO NOT MODIFY
 
@@ -62,9 +62,11 @@ hw1-asr/
 
 **Important:** Per GUIDE.md, you must NOT modify `model.py`, `weight_loader.py`, or `conv.py`.
 
-**Note:** `model.py` imports `EncoderMLP` and `LinearGELU` from `layers.py`. These
-classes must exist and work correctly. `model.py` also natively includes `generate_v8b()`
-with KV-cached generation — no need to add this yourself.
+**Key model.py facts (origin/main):**
+- Encoder MLP uses plain `self.fc1(x) → gelu(x) → self.fc2(x)` — NOT the `EncoderMLP` class
+- Projector uses plain `self.linear_1(x) → self.act(x) → self.linear_2(x)` — NOT `LinearGELU`
+- Only has stock `generate()` — O(n²) decode, no KV cache
+- `EncoderMLP` and `LinearGELU` classes exist in layers.py but are NOT used by model.py
 
 ---
 
@@ -161,15 +163,12 @@ def rmsnorm_kernel(x_ptr, w_ptr, y_ptr, stride_x, stride_y,
     offs = tl.arange(0, BLOCK_SIZE)
     mask = offs < hidden_size
 
-    # Load one row
     x = tl.load(x_ptr + pid * stride_x + offs, mask=mask, other=0.0)
     x = x.to(tl.float32)
 
-    # Compute RMS
     var = tl.sum(x * x, axis=0) / hidden_size
     x_norm = x * tl.rsqrt(var + eps)
 
-    # Apply weight
     w = tl.load(w_ptr + offs, mask=mask, other=0.0)
     y = x_norm * w
     tl.store(y_ptr + pid * stride_y + offs, y, mask=mask)
@@ -187,27 +186,11 @@ y = (x - mean(x)) / sqrt(var(x) + eps) * weight + bias
 **Key difference from RMSNorm:** Subtract mean first, then compute variance.
 Also applies bias in addition to weight.
 
-```python
-mean = tl.sum(x, axis=0) / hidden_size
-x_centered = x - mean
-var = tl.sum(x_centered * x_centered, axis=0) / hidden_size
-x_norm = x_centered * tl.rsqrt(var + eps)
-y = x_norm * w + b  # Note: includes bias
-```
-
 #### 4.5 Softmax Kernel
 
 **What it does:** Numerically stable softmax
 ```
 y = exp(x - max(x)) / sum(exp(x - max(x)))
-```
-
-```python
-x = tl.load(x_ptr + row * stride_x + offs, mask=mask, other=-float("inf"))
-x = x - tl.max(x, axis=0)       # Subtract max for stability
-exp_x = tl.exp(x)
-denom = tl.sum(exp_x, axis=0)
-y = exp_x / denom
 ```
 
 **Why subtract max?** Without this, `exp(1000)` overflows to infinity.
@@ -219,39 +202,10 @@ y = exp_x / denom
 **What it does:** `C = A @ B` using 2D tiled algorithm
 
 This is the most complex kernel. It divides the output matrix into tiles and
-accumulates each tile's result by iterating over the K dimension:
+accumulates each tile's result by iterating over the K dimension.
 
-```python
-@triton.jit
-def linear_kernel_tf32(a_ptr, b_ptr, c_ptr, M, N, K,
-                       stride_am, stride_ak, stride_bk, stride_bn,
-                       stride_cm, stride_cn,
-                       BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr,
-                       BLOCK_K: tl.constexpr):
-    pid_m = tl.program_id(0)  # Row tile
-    pid_n = tl.program_id(1)  # Column tile
-
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    offs_k = tl.arange(0, BLOCK_K)
-
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-
-    for k in range(0, K, BLOCK_K):
-        a = tl.load(a_ptr + offs_m[:, None] * stride_am +
-                     (k + offs_k[None, :]) * stride_ak,
-                     mask=(offs_m[:, None] < M) & (k + offs_k[None, :] < K),
-                     other=0.0)
-        b = tl.load(b_ptr + (k + offs_k[:, None]) * stride_bk +
-                     offs_n[None, :] * stride_bn,
-                     mask=(k + offs_k[:, None] < K) & (offs_n[None, :] < N),
-                     other=0.0)
-        acc += tl.dot(a, b)  # Uses tensor cores!
-
-    tl.store(c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn,
-             acc,
-             mask=(offs_m[:, None] < M) & (offs_n[None, :] < N))
-```
+**`tl.dot(a, b)`** compiles to tensor core instructions (HMMA/WMMA) on
+supported GPUs, giving ~10x speedup over regular FP32 multiply-add.
 
 **Grid:** `(ceil(M/BLOCK_M), ceil(N/BLOCK_N))` — 2D grid of output tiles.
 
@@ -265,7 +219,7 @@ The original assignment has three separate attention kernels:
 - **Attention Output**: `attn_weights @ V` weighted sum
 
 These still exist in the codebase but are **superseded by the fused Flash Attention
-kernel** (see Section 6.8).
+kernel** (see Section 4.10).
 
 #### 4.10 Fused Flash Attention Kernel (Advanced)
 
@@ -290,19 +244,13 @@ for start_n in range(0, kv_len, BLOCK_N):
 acc = acc / l_i[:, None]                      # Final normalization
 ```
 
-Key advantages over the 3-kernel approach:
-- **No DRAM scores matrix** — scores stay in SRAM/registers
-- **Single kernel launch** — no synchronization between kernels
-- **O(BLOCK) SRAM** — memory-efficient for long sequences
-- Uses `tl.dot` for tensor core acceleration on both Q@K^T and P@V
-
 ### Phase 5: Positional Encoding
 
-#### 4.10 RoPE Frequency Kernel
+#### 4.11 RoPE Frequency Kernel
 
 Precomputes `cos/sin(position * inv_freq)` for all positions and frequencies.
-The output is duplicated into both halves (first half = second half) because
-`apply_rotary_pos_emb` splits the input and applies the same frequencies to each half.
+The output is duplicated into both halves because `apply_rotary_pos_emb` splits
+the input and applies the same frequencies to each half.
 
 ---
 
@@ -316,14 +264,10 @@ python attention.py     # 17-case numerical parity suite for Flash Attention
 python rope.py          # Tests RoPE frequency computation
 ```
 
-`attention.py` is now more than a smoke test. It runs deterministic parity
-checks against a pure PyTorch reference, prints the active device, and warns
-when it is only exercising the CPU fallback path instead of the Triton CUDA path.
-
 ### End-to-end benchmark:
 ```bash
 cd hw1-asr
-python benchmark_student.py glm_asr_triton_template --warmup 1 --runs 3
+python benchmark_student.py glm_asr_triton_template --warmup 2 --runs 5
 
 # Compare against baseline
 python benchmark_student.py glm_asr_triton_example --warmup 1 --runs 3
@@ -338,100 +282,51 @@ Expected output: `Concord returned to its place amidst the tents.`
 ### 6.1 Backend Selection
 ```python
 # In __init__.py:
-layers.Linear.BACKEND = "torch"   # current config; uses F.linear -> cuBLAS/cuBLASLt
-layers.Linear.BACKEND = "triton"  # strict linear-kernel path
+layers.Linear.BACKEND = "torch"   # cuBLAS — fastest on RTX 5090
+layers.Linear.BACKEND = "triton"  # strict Triton kernel path
 ```
-
-The current committed repo keeps the cuBLAS path because it is faster end-to-end
-on the RTX 5090 stack. If you need strict GUIDE.md adherence for the assigned
-linear kernel, switch `Linear.BACKEND` back to `"triton"`.
 
 ### 6.2 Runtime Flags
 ```python
-# In __init__.py:
 torch.set_float32_matmul_precision("high")
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 ```
 
-These are low-risk runtime toggles that help PyTorch and cuDNN pick faster
-tensor-core kernels for float32-heavy paths.
-
-### 6.3 Enable Kernel Fusion
+### 6.3 Kernel Fusion
 ```python
-# In __init__.py:
-layers.MLP.FUSED = True           # Fused SwiGLU in decoder MLP
-layers.EncoderMLP.FUSED = True    # Fused Linear+GELU in encoder MLP
-```
-`model.py` uses both `MLP` (decoder SwiGLU) and `EncoderMLP` (encoder GELU MLP).
-Both fusion flags are active and provide speedup.
-
-**Note on LinearGELU:** `model.py` also uses `LinearGELU` for the projector, but
-`LinearGELU.FUSED` is set to `False` in layers.py because the projector's large
-dimensions (5120x4096) with tile sizes 128x128x64 require 131KB shared memory,
-exceeding the RTX 5090's 101KB limit. The unfused cuBLAS + separate GELU path
-is used instead.
-
-### 6.4 Tune Tile/Block Sizes
-```python
-# In layers.py:
-Linear.TILE_M = 128  # Try 32, 64, 128
-Linear.TILE_N = 128
-Linear.TILE_K = 64
-
-MLP.TILE_M, MLP.TILE_N, MLP.TILE_K = 64, 64, 32  # Smaller for fused kernels
+layers.MLP.FUSED = True           # Fused SwiGLU in decoder MLP — EFFECTIVE
+layers.EncoderMLP.FUSED = True    # NOT USED by origin/main model.py
+# LinearGELU.FUSED = False        # NOT USED by origin/main model.py
 ```
 
-### 6.5 bfloat16 Weights
+**Important:** Only `MLP.FUSED` actually affects performance. The origin/main `model.py`
+does NOT use `EncoderMLP` or `LinearGELU` — it uses plain `Linear` + `gelu()` for the
+encoder MLP and projector.
+
+### 6.4 bfloat16 Weights
 ```python
-# In layers.py (class-level default):
-Linear.BF16 = True
+Linear.BF16 = True  # Class default in layers.py
 ```
+Caches bf16 copies of weights. Must be set as class default (not just `__init__.py`)
+because `__init__.py` is not always executed during benchmark imports.
 
-Caches bfloat16 copies of weights on first use. All matmuls via `F.linear` run
-in bf16, halving memory traffic for memory-bound decode matmuls. Results are
-cast back to float32 for downstream ops.
-
-This must be set as a class-level default in `layers.py` (not just in `__init__.py`)
-because `__init__.py` is not executed when the benchmark imports modules directly.
-
-### 6.6 Fused Flash Attention (Triton)
-```python
-# In attention.py — primary CUDA path:
-flash_attention_kernel[grid](
-    q_flat, k_flat, v_flat, output, mask_flat, scale, ...,
-    IS_CAUSAL=is_causal, HAS_MASK=has_mask,
-    BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_D=BLOCK_D,
-    num_stages=1,
-)
-```
-
-Replaces SDPA and the old 3-kernel approach with a single Triton kernel using
-online softmax. No full attention scores matrix materialized in DRAM.
-
-**Tile sizes** are chosen based on head_dim to fit the 101KB shared memory limit:
+### 6.5 Fused Flash Attention
+Single Triton kernel with online softmax. Tile sizes chosen per head_dim:
 - `head_dim=64` (encoder): `BLOCK_M=128, BLOCK_N=64`
 - `head_dim=128` (decoder): `BLOCK_M=64, BLOCK_N=32`
 
-`num_stages=1` prevents Triton from double-buffering K/V loads which would
-exceed shared memory.
+`num_stages=1` to prevent shared memory overflow on RTX 5090 (101KB limit).
 
-### 6.7 GQA with Flash Attention
-```python
-# In attention.py:
-if use_gqa:
-    k = _expand_kv_heads(k, num_heads)
-    v = _expand_kv_heads(v, num_heads)
-```
+### 6.6 Planned Optimizations (from branch analysis)
 
-GQA is handled by explicitly expanding KV heads before the Flash Attention
-kernel call. The expansion is a zero-copy broadcast+reshape, so the overhead
-is minimal.
-
-### 6.8 Activation Block Size
-GELU and SiLU use BLOCK_SIZE=1024 by default. On GPUs with many SMs (like RTX 5090
-with 170 SMs), larger blocks reduce launch overhead.
+| Optimization | Source | Impact | Status |
+|-------------|--------|--------|--------|
+| Fused Q+K RoPE kernel | **meave** | **-14ms** | ADOPTED |
+| bf16 RMSNorm output | **meave** (adapted) | **-3ms** | ADOPTED |
+| Swizzled SwiGLU | **yash/optimize** | +18ms regression | Rejected |
+| @triton.autotune | **majed** | +0.7ms overhead | Rejected |
 
 ---
 
@@ -441,34 +336,30 @@ with 170 SMs), larger blocks reduce launch overhead.
 |-------|-------|-----|
 | `CUDA error: invalid configuration argument` | BLOCK_SIZE too large | Reduce to power of 2, max ~1024 |
 | `triton.CompilationError` | Mismatched tensor shapes | Check mask dimensions match data |
-| `CUBLAS_STATUS_INVALID_VALUE` | cuBLAS version mismatch | `pip uninstall nvidia-cublas` (use system libs) |
+| `CUBLAS_STATUS_INVALID_VALUE` | cuBLAS version mismatch | `pip uninstall nvidia-cublas` |
 | `OutOfResources: shared memory` | Fused kernel tiles too large | Reduce tile sizes or disable fusion |
 | Values all zero | Mask not applied correctly | Verify `offs < size` mask |
 | NaN/Inf in output | Missing numerical stability | Subtract max before exp in softmax |
-| Wrong matmul results | Stride computation error | Print strides, verify A(M,K) @ B(K,N) |
-| `RuntimeError: forward compatibility` | CUDA toolkit/driver mismatch | Match driver to toolkit version |
 | `__init__.py` settings not taking effect | Benchmark imports modules directly | Set defaults as class attributes in layers.py |
 
 ---
 
-## 8. Performance Results
+## 8. Performance Results (RTX 5090, 2026-03-12)
 
 | Implementation | Time | Speed | vs Baseline |
 |----------------|------|-------|-------------|
-| Our optimized template | **110.0ms** | 8.46ms/tok | **57.9% faster** |
+| Our optimized template | **120.7ms** | 9.29ms/tok | **53.8% faster** |
 | Example baseline | 261.3ms | 20.10ms/tok | -- |
 | CPU fallback (no GPU) | ~14,000ms | ~1,000ms/tok | -- |
 
 Key optimizations ranked by impact:
 1. **cuBLAS-backed `F.linear`** + TF32 flags — cuBLAS outperforms Triton linear kernel
 2. **bfloat16 weights** — halves memory traffic for decode matmuls
-3. **Fused Flash Attention** — Triton kernel with online softmax, replaces SDPA and 3-kernel approach
-4. **Fused SwiGLU + EncoderMLP** — reduces kernel launch overhead and DRAM round-trips
-5. **KV-cached generation** — natively in model.py, O(n) decode instead of O(n^2)
+3. **Fused Flash Attention** — Triton kernel with online softmax
+4. **Fused SwiGLU** — reduces kernel launch overhead and DRAM round-trips for decoder MLP
 
-Validation coverage for the current attention path is also stronger than before:
-- deterministic 17-case parity suite in `attention.py`
-- covers ragged encoder lengths, decoder prefill lengths, both attention-mask layouts, GQA, single-token decode, decode with causal+mask, and non-power-of-two shapes
+Detailed profiling shows decoder decode steps dominate (82.8% of total time with
+50 tokens) because stock `generate()` is O(n²) — no KV cache.
 
 ---
 

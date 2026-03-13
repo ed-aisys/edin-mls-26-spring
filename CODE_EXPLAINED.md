@@ -15,6 +15,7 @@ A detailed explanation of every component in the GLM-ASR Triton implementation.
 7. [weight_loader.py — Model Weights](#7-weight_loaderpy--model-weights)
 8. [benchmark_student.py — Testing](#8-benchmark_studentpy--testing)
 9. [How It All Fits Together](#9-how-it-all-fits-together)
+10. [Optimization Sources](#10-optimization-sources)
 
 ---
 
@@ -45,8 +46,8 @@ These are general-purpose and highly optimized, but:
 
 ### File Modification Rules
 
-Per GUIDE.md, these files are **read-only** (shared infrastructure):
-- `model.py` — model architecture and generation loop (includes `generate_v8b` with KV cache)
+Per GUIDE.md, these files are **read-only** (must match origin/main):
+- `model.py` — model architecture and generation loop (stock `generate()`, no KV cache)
 - `weight_loader.py` — loads pre-trained weights from HuggingFace
 - `conv.py` — 1D convolution for audio subsampling
 
@@ -115,7 +116,7 @@ y = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 Uses `tl.extra.cuda.libdevice.tanh` for the tanh computation — this calls into
 NVIDIA's libdevice math library for hardware-optimized transcendental functions.
 
-**Where used:** Audio encoder MLP (via `EncoderMLP`), Projector (via `LinearGELU`)
+**Where used:** Audio encoder MLP (standalone `gelu()` call after `fc1`), Projector (`self.act = gelu`)
 
 ### 2.5 SiLU Kernel
 
@@ -153,9 +154,6 @@ For each output tile (BLOCK_M x BLOCK_N):
 **`tl.dot(a, b)`** compiles to tensor core instructions (HMMA/WMMA) on
 supported GPUs, giving ~10x speedup over regular FP32 multiply-add.
 
-**Padding:** The `Linear` class pads input dimensions to multiples of TILE_M/N/K
-so the kernel doesn't need bounds checking in the hot loop.
-
 **Where used:** Every Linear layer in the model (Q, K, V, O projections, MLP layers, LM head)
 
 ### 2.7 Softmax Kernel
@@ -164,62 +162,49 @@ so the kernel doesn't need bounds checking in the hot loop.
 
 **Math:** `y_i = exp(x_i - max(x)) / sum(exp(x_j - max(x)))`
 
-**Numerical Stability:** Without subtracting max, `exp(1000)` = infinity.
-By subtracting the maximum value first, the largest exponent is `exp(0) = 1`.
-
 **Where used:** Final token prediction (standalone softmax)
 
-### 2.8 Fused Kernels (Pre-implemented in the template)
+### 2.8 Fused Kernels
 
 **linear_gelu_kernel:** Computes `GELU(x @ W + b)` in a single kernel launch.
 Instead of: matmul -> write to DRAM -> read from DRAM -> GELU,
 it does: matmul -> GELU (all in registers). Eliminates one DRAM round-trip.
+**Note:** This kernel exists in layers.py but is NOT currently used by model.py
+(model.py calls `fc1` then `gelu` separately).
 
 **swiglu_fused_kernel:** Computes `SiLU(x @ W_gate) * (x @ W_up)` in one kernel.
 Fuses THREE operations: two matmuls and the gating. Input `x` is loaded once.
+**Active when `MLP.FUSED = True`** — used by the decoder MLP.
 
 ### 2.9 Layer Classes
 
 **`RMSNorm` class:** Wraps the kernel with device management and fallback.
 - Checks if hidden_size fits in BLOCK_SIZE (must be power of 2)
 - Falls back to PyTorch if not on CUDA
-- Manages weight tensor device placement
 
 **`Linear` class:** Switchable between torch (cuBLAS) and Triton backends.
-- `BACKEND = "torch"`: Uses `torch.nn.functional.linear(...)`, which routes the
-  matmul path through PyTorch's cuBLAS/cuBLASLt dispatch
+- `BACKEND = "torch"`: Uses `F.linear(...)` → cuBLAS/cuBLASLt (current, fastest)
 - `BACKEND = "triton"`: Uses `linear_kernel_tf32`
-- `BF16 = True` (class-level default): Caches bfloat16 copies of weights
-  (`_weight_bf16`, `_bias_bf16`). All matmuls via `F.linear` run in bf16,
-  halving memory traffic for memory-bound decode matmuls. Results are cast
-  back to float32. This is set as a class default because `__init__.py` is
-  not executed during benchmark imports.
-- `__init__.py` also enables `torch.set_float32_matmul_precision("high")`,
-  TF32 matmul, TF32 cuDNN, and `cudnn.benchmark`
-- The committed configuration keeps the cuBLAS path because it wins end-to-end
-  on this RTX 5090 stack
-- Caches transposed/padded weights (`_weight_t_padded`) for Triton path
+- `BF16 = True` (class default): Caches bf16 weight copies, halves memory traffic
 
 **`MLP` class:** Implements SwiGLU gating for the text decoder:
 ```
 output = down_proj(SiLU(gate_proj(x)) * up_proj(x))
 ```
 When `FUSED=True`, uses `swiglu_fused_kernel` for the gate+up computation.
+**This IS used by model.py** — the decoder's `self.mlp = MLP(...)`.
 
 **`EncoderMLP` class:** Simpler MLP without gating for the audio encoder:
 ```
 output = fc2(GELU(fc1(x)))
 ```
 When `FUSED=True`, uses `linear_gelu_kernel` for fc1+GELU.
-`model.py` uses `EncoderMLP` for encoder layers (`self.mlp = EncoderMLP(...)`),
-and aliases `self.fc1 = self.mlp.fc1` / `self.fc2 = self.mlp.fc2` for weight loading.
+**NOT used by origin/main model.py** — the encoder uses plain `self.fc1 = Linear(...)`
+and calls `gelu()` inline. The class exists for compatibility but is dead code.
 
-**`LinearGELU` class:** A `GELU(Linear(x))` wrapper used by the projector.
-`model.py` creates `self.linear_1_gelu = LinearGELU(5120, 4096)` for the
-first projector layer. `FUSED` is set to `False` in layers.py because the
-large dimensions (5120x4096) with tile sizes 128x128x64 require 131KB shared
-memory, exceeding the RTX 5090's hardware limit of 101KB. The unfused path
-(cuBLAS matmul + separate GELU kernel) is used instead.
+**`LinearGELU` class:** A `GELU(Linear(x))` wrapper.
+**NOT used by origin/main model.py** — the projector uses plain `self.linear_1 = Linear(...)`
+and calls `self.act()` inline. Dead code.
 
 ---
 
@@ -235,21 +220,18 @@ Attention(Q, K, V) = softmax(Q @ K^T / sqrt(d_k)) @ V
 ### 3.2 Primary Path: Fused Flash Attention Kernel (Triton)
 
 The committed runtime path uses a fused Triton Flash Attention kernel with
-**online softmax** as the primary attention implementation. This replaces both
-SDPA and the old 3-kernel approach.
+**online softmax** as the primary attention implementation.
 
 ```python
 # attention.py — scaled_dot_product_attention()
 if q.is_cuda:
-    # Expand GQA heads before kernel call
     if use_gqa:
         k = _expand_kv_heads(k, num_heads)
         v = _expand_kv_heads(v, num_heads)
-    # Single fused kernel launch
     flash_attention_kernel[grid](
         q_flat, k_flat, v_flat, output, mask_flat, scale, ...,
         IS_CAUSAL=is_causal, HAS_MASK=has_mask,
-        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_D=BLOCK_D,
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_D=head_dim_padded,
         num_stages=1,
     )
 ```
@@ -266,8 +248,6 @@ acc = 0             # output accumulator [BLOCK_M, BLOCK_D]
 
 for each K/V block:
     S = Q_tile @ K_block^T          # tl.dot — tensor cores
-    # Apply causal mask (if IS_CAUSAL)
-    # Apply attention mask bias (if HAS_MASK)
     m_new = max(m_i, max(S))        # updated running max
     alpha = exp(m_i - m_new)        # rescale factor for old state
     p = exp(S - m_new)              # new attention weights
@@ -279,71 +259,42 @@ output = acc / l_i                  # final normalization
 ```
 
 **Why this is better than the 3-kernel approach:**
-1. **No DRAM scores matrix** — the full `(batch*heads, seq_q, seq_k)` scores
-   matrix is never materialized. Everything stays in SRAM/registers.
-2. **Single kernel launch** — no synchronization overhead between kernels.
+1. **No DRAM scores matrix** — everything stays in SRAM/registers.
+2. **Single kernel launch** — no synchronization overhead.
 3. **O(BLOCK) SRAM** — memory-efficient for long sequences.
 4. **Tensor cores** — `tl.dot` for both Q@K^T and P@V.
 
 **Tile sizes** (chosen to fit 101KB shared memory):
-- Encoder (head_dim=64): `BLOCK_M=128, BLOCK_N=64` — larger tiles for more parallelism
-- Decoder (head_dim=128): `BLOCK_M=64, BLOCK_N=32` — smaller tiles due to larger SRAM per element
-- `num_stages=1` — prevents Triton from double-buffering K/V loads
+- Encoder (head_dim=64): `BLOCK_M=128, BLOCK_N=64`
+- Decoder (head_dim=128): `BLOCK_M=64, BLOCK_N=32`
+- `num_stages=1` — prevents double-buffering overflow
 
 **Features:**
-- `IS_CAUSAL` (constexpr): enables causal masking for decoder (`offs_m >= cur_offs_n`)
-- `HAS_MASK` (constexpr): enables additive attention mask bias (zero overhead when False)
-- Supports arbitrary sequence lengths (no `MAX_ATTENTION_DIM` limit)
+- `IS_CAUSAL` (constexpr): causal masking for decoder
+- `HAS_MASK` (constexpr): additive attention mask bias (zero overhead when False)
+- Supports arbitrary sequence lengths
 
 ### 3.3 Legacy Attention Kernels
 
-The file also contains three legacy kernels from the original assignment:
-
-1. **`attention_scores_kernel`**: Computes `Q @ K^T * scale` for one query position
-   using broadcast-multiply and reduction.
-2. **`softmax_inplace_kernel`**: In-place numerically stable softmax.
-3. **`attention_output_kernel`**: Computes `attn_weights @ V` weighted sum.
-
-These are superseded by `flash_attention_kernel` but remain in the codebase.
+Three legacy kernels from the original assignment (superseded by Flash Attention):
+1. **`attention_scores_kernel`**: Q @ K^T * scale
+2. **`softmax_inplace_kernel`**: In-place softmax
+3. **`attention_output_kernel`**: attn_weights @ V
 
 ### 3.4 Grouped Query Attention (GQA)
 
 The text decoder uses GQA: 16 query heads but only 4 KV heads.
-Each KV head is shared by 4 query heads. This reduces KV-state size by 4x.
+GQA is handled by `_expand_kv_heads()` before the Flash Attention kernel call.
 
-GQA is handled by explicitly expanding KV heads using `_expand_kv_heads()` before
-the Flash Attention kernel call. The expansion is a zero-copy broadcast+reshape.
+### 3.5 Numerical Parity Tests
 
-### 3.5 Causal Masking
-
-In the Flash Attention kernel, causal masking is applied per-block:
-```python
-if IS_CAUSAL:
-    s = tl.where(offs_m[:, None] >= cur_offs_n[None, :], s, -float("inf"))
-```
-The kernel also short-circuits the K/V iteration range for causal mode:
-```python
-kv_len = tl.minimum(seq_k, (pid_m + 1) * BLOCK_M)  # skip future blocks entirely
-```
-
-### 3.6 Numerical Parity Tests
-
-The file now includes a deterministic 17-case parity suite (`__main__` block)
-that validates the Flash Attention kernel against a pure PyTorch reference.
-
-It covers:
-- basic and causal attention at `head_dim=64` and `head_dim=128`
-- additive masks with both `(batch, 1, seq_q, seq_k)` and `(batch, heads, seq_q, seq_k)` layouts
-- GQA cases (`16` query heads / `4` KV heads and smaller `4Q/2KV` cases)
-- encoder-like ragged lengths (`175`)
-- decoder-like prefill lengths (`93`)
-- single-token decode shapes
-- decode with both causal masking and additive attention masks
-- non-power-of-two shapes like `17 x 61`
-
-The test harness uses fixed RNG seeds and prints the active device so it is
-obvious whether it is validating the Triton CUDA path or only the CPU fallback.
-All current cases pass with max diff < `0.01` (fp32 accumulation tolerance).
+17-case deterministic parity suite in `__main__` block, covering:
+- basic and causal attention at head_dim=64 and head_dim=128
+- additive masks with both `(batch,1,seq_q,seq_k)` and `(batch,heads,seq_q,seq_k)` layouts
+- GQA cases (16Q/4KV and 4Q/2KV)
+- encoder-like ragged lengths (175), decoder-like prefill (93)
+- single-token decode, decode with causal+mask
+- non-power-of-two shapes (17x61)
 
 ---
 
@@ -353,44 +304,25 @@ All current cases pass with max diff < `0.01` (fp32 accumulation tolerance).
 
 Rotary Position Embeddings encode position information by rotating the
 query and key vectors in 2D subspaces. For dimensions `(x1, x2)` at position `p`:
-
 ```
 x1_rot = x1 * cos(p*freq) - x2 * sin(p*freq)
 x2_rot = x2 * cos(p*freq) + x1 * sin(p*freq)
 ```
 
-### 4.2 Frequency Computation
-
-Each pair of dimensions has a different frequency:
-```
-freq_i = 1 / (base^(2i/d))    where base=10000 (encoder) or 500000 (decoder)
-```
-Low-frequency pairs capture long-range position differences,
-high-frequency pairs capture fine-grained positions.
-
-### 4.3 Partial RoPE
+### 4.2 Partial RoPE
 
 The audio encoder uses 50% partial RoPE — only the first half of each
 head's dimensions are rotated. The rest pass through unchanged.
 
-### 4.4 Kernel Implementation
+### 4.3 Kernel Implementation
 
-The `compute_freqs_kernel` precomputes cos/sin for all positions:
-```
-For each position p:
-    freqs = p * inv_freq[:]           # Element-wise multiply
-    cos_cache[p, :half] = cos(freqs)  # First half
-    cos_cache[p, half:] = cos(freqs)  # Second half (duplicated)
-    sin_cache[p, :half] = sin(freqs)
-    sin_cache[p, half:] = sin(freqs)
-```
-
-The duplication is because `apply_rotary_pos_emb` splits the input into
-first half and second half, each multiplied by the same cos/sin.
+The `compute_freqs_kernel` precomputes cos/sin for all positions.
+The duplication (first half = second half) is because `apply_rotary_pos_emb`
+splits the input into halves, each multiplied by the same cos/sin.
 
 ---
 
-## 5. model.py — Full Model Pipeline (READ-ONLY)
+## 5. model.py — Full Model Pipeline (READ-ONLY, origin/main)
 
 This file cannot be modified. Understanding it helps you implement correct kernels.
 
@@ -398,40 +330,40 @@ This file cannot be modified. Understanding it helps you implement correct kerne
 
 ```python
 class AudioEncoder:
-    conv1: Conv1d(128 -> 1280, k=3, s=1)   # Feature expansion
-    conv2: Conv1d(1280 -> 1280, k=3, s=2)  # 2x downsample
+    conv1: Conv1d(128 -> 1280, k=3, s=1)
+    conv2: Conv1d(1280 -> 1280, k=3, s=2)
     rotary_emb: RotaryEmbedding(dim=64, partial=0.5)
-    layers: [AudioEncoderLayer x 32]        # Transformer layers
-    layer_norm: LayerNorm(1280)             # Final normalization
+    layers: [AudioEncoderLayer x 32]
+    layer_norm: LayerNorm(1280)
 ```
 
-**Forward pass:**
-1. Conv1 + GELU: `(1, 128, T)` -> `(1, 1280, T)`
-2. Conv2 + GELU: `(1, 1280, T)` -> `(1, 1280, T/2)` (stride 2)
-3. Permute: `(1, T/2, 1280)` (seq_len first for transformer)
-4. 32x transformer layers with partial RoPE
-5. Final LayerNorm
-
-**AudioEncoderLayer MLP:** Uses `EncoderMLP` class from layers.py:
+**AudioEncoderLayer MLP:** Uses plain `Linear` layers, NOT `EncoderMLP`:
 ```python
-self.mlp = EncoderMLP(hidden_size, intermediate_size, activation="gelu", bias=True)
-self.fc1 = self.mlp.fc1  # Alias for weight loading
-self.fc2 = self.mlp.fc2
+# model.py lines 86-87, 127-129:
+self.fc1 = Linear(hidden_size, intermediate_size, bias=True)
+self.fc2 = Linear(intermediate_size, hidden_size, bias=True)
+# ...
+hidden_states = self.fc1(hidden_states)
+hidden_states = gelu(hidden_states)   # standalone gelu() call
+hidden_states = self.fc2(hidden_states)
 ```
-When `EncoderMLP.FUSED = True`, the fused `linear_gelu_kernel` is used for fc1+GELU.
 
 ### 5.2 MultiModalProjector
 
-Bridges audio and text spaces:
+Uses plain `Linear` layers, NOT `LinearGELU`:
 ```python
-class MultiModalProjector:
-    pool_factor = 4                       # Concatenate 4 frames -> 1
-    linear_1_gelu: LinearGELU(5120, 4096) # Fused Linear+GELU (fusion disabled due to shared mem)
-    linear_2: Linear(4096, 2048)          # Match text hidden size
+# model.py lines 578-580, 619-621:
+self.linear_1 = Linear(pooled_dim, config.projector_hidden_size, bias=True)
+self.act = gelu
+self.linear_2 = Linear(config.projector_hidden_size, config.text_hidden_size, bias=True)
+# ...
+hidden_states = self.linear_1(pooled)
+hidden_states = self.act(hidden_states)   # standalone gelu() call
+hidden_states = self.linear_2(hidden_states)
 ```
 
 Pool 4 audio frames by concatenation: `(1, T/2, 1280)` -> `(1, T/8, 5120)`
-Then `LinearGELU(5120->4096)` -> `Linear(4096->2048)`.
+Then `Linear(5120->4096) + gelu + Linear(4096->2048)`.
 
 ### 5.3 TextDecoder
 
@@ -443,11 +375,8 @@ class TextDecoder:
     norm: RMSNorm(2048)
 ```
 
-**KV cache infrastructure** (used by `generate_v8b`):
-- `allocate_kv_buffers(batch_size, max_seq_len)` — creates pre-allocated
-  storage for all 28 layers' key and value states
-- `forward_with_kv_buffers(embeds, kv_buffers, cache_pos)` — runs the forward
-  pass writing/reading from the KV cache, returns updated `cache_pos`
+**No KV cache infrastructure** in origin/main. Each forward pass processes the
+full input sequence.
 
 ### 5.4 DecoderLayer
 
@@ -455,115 +384,71 @@ Each decoder layer:
 1. RMSNorm -> Q/K/V projections -> Reshape to heads
 2. Apply full RoPE to Q and K
 3. Pass 4-head K/V tensors into `scaled_dot_product_attention`
-4. Inside `attention.py`, GQA handled via `_expand_kv_heads` + Flash Attention kernel
-5. Causal attention (fused Flash Attention with online softmax)
+4. GQA handled via `_expand_kv_heads` + Flash Attention kernel
+5. Causal attention
 6. Output projection + residual
 7. RMSNorm -> SwiGLU MLP + residual
 
 ### 5.5 Generation Pipeline
 
-**`generate()` delegates to `generate_v8b()` — both are natively in model.py.**
-
-`generate_v8b()` uses KV-cached O(n) decode:
+**`generate()`** is the ONLY generation method (no `generate_v8b`/`v8`/`v6`).
+It uses **O(n²) decode** — reprocesses the full growing sequence each step:
 
 ```python
-def generate_v8b(self, input_features, input_ids=None, ...):
-    # 1. Prepare inputs (encode audio, splice into text embeddings)
-    inputs_embeds, seed_tokens = self._prepare_generation_inputs(...)
+def generate(self, input_features, input_ids=None, ...):
+    # 1. Encode audio
+    audio_embeds = self.encode_audio(input_features, ...)
 
-    # 2. Allocate KV buffers for all 28 decoder layers
-    kv_buffers = self.text_decoder.allocate_kv_buffers(batch_size, max_len)
+    # 2. Build initial inputs_embeds (audio + text tokens)
+    inputs_embeds = torch.cat([before_audio, audio_embeds, after_audio], dim=1)
 
-    # 3. Prefill: process full sequence once, cache all KV states
-    hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(
-        inputs_embeds, kv_buffers, 0
-    )
-    logits = self.lm_head(hidden[:, -1:, :])
-
-    # 4. Decode loop: only pass the new token each step
+    # 3. Autoregressive decode — O(n²)
     for _ in range(max_new_tokens):
-        next_token = self._sample_next_token(logits[:, -1, :] / temperature, ...)
-        if all_finished: break
-        next_embeds = self.text_decoder.embed_tokens(next_token)
-        hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(
-            next_embeds, kv_buffers, cache_pos  # Just 1 token!
-        )
-        logits = self.lm_head(hidden[:, -1:, :])
+        logits = self.decode(inputs_embeds=inputs_embeds)  # Full sequence!
+        next_token = sample(logits[:, -1, :])
+        if eos: break
+        new_embeds = self.text_decoder.embed_tokens(next_token)
+        inputs_embeds = torch.cat([inputs_embeds, new_embeds], dim=1)  # Grows!
 ```
 
-`benchmark_student.py` checks `hasattr(model, 'generate_v8b')` and uses it
-when available.
+Each decode step processes the ENTIRE `inputs_embeds` through all 28 decoder layers.
+This is why decoder decode dominates at 82.8% in detailed benchmarks.
 
 ---
 
 ## 6. conv.py — Audio Feature Extraction (READ-ONLY)
 
 Conv1D layers that downsample the mel spectrogram:
-
 ```python
-class Conv1d:
-    """1D convolution using im2col + matrix multiply."""
-
 class Conv1dSubsampler:
     conv1: Conv1d(128, 1280, kernel=3, stride=1)   # Keep length
     conv2: Conv1d(1280, 1280, kernel=3, stride=2)  # Halve length
 ```
 
 Uses `im2col_1d()` to reshape convolution into matrix multiply, then either
-a Triton kernel (for small padded shapes on CUDA) or `torch.einsum` (fallback).
+a Triton kernel or `torch.einsum` (fallback).
 
 ---
 
 ## 7. weight_loader.py — Model Weights (READ-ONLY)
 
-Downloads pre-trained weights from HuggingFace and maps them to our model:
-
-```python
-def load_model_from_hf(model_id="zai-org/GLM-ASR-Nano-2512"):
-    # 1. Load config from HuggingFace, create GlmAsrConfig
-    # 2. Create GlmAsrModel with config
-    # 3. Download and load HF model (GlmAsrForConditionalGeneration)
-    # 4. Map HF state_dict keys to our model attributes
-    # 5. Load processor (tokenizer + feature extractor)
-    return model, processor
-```
+Downloads pre-trained weights from HuggingFace and maps them to our model.
 
 ---
 
 ## 8. benchmark_student.py — Testing
 
-### Input Preparation
-```python
-processor.apply_transcription_request(audio_array)
-# Returns: input_features (mel spectrogram), input_ids (with audio placeholders)
-```
-
 ### Generate Function Selection
 ```python
 # benchmark_student.py checks for optimized generate methods:
 if hasattr(model, 'generate_v8b'):
-    generate_fn = model.generate_v8b    # KV-cached (natively in model.py)
+    generate_fn = model.generate_v8b    # Not available in origin/main
 elif hasattr(model, 'generate_v8'):
-    generate_fn = model.generate_v8
+    generate_fn = model.generate_v8     # Not available in origin/main
 elif hasattr(model, 'generate_v6'):
-    generate_fn = model.generate_v6
+    generate_fn = model.generate_v6     # Not available in origin/main
 else:
-    generate_fn = model.generate        # Fallback
-```
-
-### Benchmark Loop
-```python
-# Warmup (compile Triton kernels, warm caches)
-for _ in range(warmup_runs):
-    model.generate(input_features, input_ids=input_ids, ...)
-
-# Timed runs
-for _ in range(num_runs):
-    torch.cuda.synchronize()
-    start = time.perf_counter()
-    output = model.generate(...)
-    torch.cuda.synchronize()
-    elapsed = (time.perf_counter() - start) * 1000  # ms
+    generate_fn = model.generate        # <-- This is what runs (stock O(n²))
 ```
 
 ### Accuracy Check
@@ -574,11 +459,9 @@ def check_transcription(transcription, expected):
     # Pass if > 80% word overlap
 ```
 
-### Current Committed Benchmark
-
-On the RTX 5090 test box, the current committed runtime path measured:
-- `110.0ms (+/- 0.3ms)` average end-to-end (with KV-cached `generate_v8b`)
-- `8.46 ms/token`
+### Current Benchmark (RTX 5090, 2026-03-12)
+- `120.7ms (+/- 0.2ms)` average, stock `generate()`
+- `9.29 ms/token`, 13 tokens generated
 - `100.0%` transcription accuracy
 
 ---
@@ -609,20 +492,21 @@ On the RTX 5090 test box, the current committed runtime path measured:
      h. output = Linear(attention)
      i. hidden = residual + output
      j. LayerNorm(hidden)
-     k. EncoderMLP: fc1 + GELU + fc2      [fused linear_gelu_kernel when FUSED=True]
+     k. fc1(x) -> gelu(x) -> fc2(x)       [cuBLAS + standalone gelu_kernel]
      l. hidden = residual + MLP_output
    -> Tensor: (1, ~175, 1280)
    |
 5. Multi-Modal Projector
    -> Pool 4 frames: (1, ~44, 5120)
-   -> LinearGELU: (1, ~44, 4096)          [cuBLAS + gelu_kernel, fusion disabled]
-   -> Linear: (1, ~44, 2048)
+   -> Linear(5120->4096): (1, ~44, 4096)   [cuBLAS bf16]
+   -> gelu: (1, ~44, 4096)                 [gelu_kernel]
+   -> Linear(4096->2048): (1, ~44, 2048)   [cuBLAS bf16]
    |
 6. Embed input tokens (chat template + audio placeholders)
    -> Replace audio placeholders with projected audio embeddings
    -> Combined: (1, ~80, 2048)
    |
-7. Text Decoder PREFILL (28 transformer layers, one pass)
+7. Text Decoder (28 transformer layers, full sequence each step)
    For each layer:
      a. RMSNorm(hidden_states)             [rmsnorm_kernel]
      b. Q (16 heads) = Linear(normalized)  [F.linear bf16]
@@ -630,24 +514,22 @@ On the RTX 5090 test box, the current committed runtime path measured:
      d. V (4 heads) = Linear(normalized)
      e. Apply full RoPE to Q, K
      f. Causal Attention via Flash Attention kernel (GQA via _expand_kv_heads)
-     g. KV states cached in kv_buffers     [forward_with_kv_buffers]
-     h. RMSNorm(hidden)
-     i. SwiGLU MLP:
-        gate = SiLU(gate_proj(x))          [silu_kernel or swiglu_fused_kernel]
+     g. RMSNorm(hidden)
+     h. SwiGLU MLP:
+        gate = SiLU(gate_proj(x))          [swiglu_fused_kernel when MLP.FUSED=True]
         up = up_proj(x)
         down = down_proj(gate * up)
-     j. hidden = residual + MLP_output
+     i. hidden = residual + MLP_output
    |
 8. Final RMSNorm + LM Head
    -> Logits: (1, ~80, 59264)
    -> Take last position: (1, 59264)
    |
-9. Autoregressive Decode (repeat for each new token)
-   With KV cache (generate_v8b — native in model.py):
-     a. Embed new token: (1, 1, 2048)
-     b. forward_with_kv_buffers: only 1 token through 28 layers
-        (reads cached KV, appends new KV, computes attention over all cached keys)
-     c. RMSNorm + LM Head -> next token logits
+9. Autoregressive Decode (O(n²) — reprocess everything each step)
+   a. Embed new token: (1, 1, 2048)
+   b. Concatenate to full inputs_embeds: (1, N+1, 2048)
+   c. Full forward pass through all 28 decoder layers
+   d. RMSNorm + LM Head -> next token logits
    -> Generates ~13 tokens for test audio
    |
 10. Decode token IDs -> text
@@ -656,27 +538,54 @@ On the RTX 5090 test box, the current committed runtime path measured:
 
 ### Kernel Call Count (Approximate, per full inference with 13 generated tokens)
 
-**With KV cache (`generate_v8b`):** Prefill processes the full sequence once.
-Each decode step processes only 1 token through the decoder.
+**Stock generate() — O(n²), no KV cache:**
+Each decode step reprocesses the full growing sequence.
 
-| Kernel | Encode | Prefill | Per Decode | x13 Steps | Total |
-|--------|:------:|:-------:|:----------:|:---------:|:-----:|
-| layernorm_kernel | 64 | 0 | 0 | 0 | 64 |
-| rmsnorm_kernel | 0 | 56 | 56 | 728 | 784 |
-| gelu_kernel | 33 | 0 | 0 | 0 | 33 |
-| silu_kernel | 0 | 28 | 28 | 364 | 392 |
-| linear (cuBLAS bf16) | ~160 | ~168 | ~168 | ~2184 | ~2512 |
-| flash_attention_kernel | 32 | 28 | 28 | 364 | 424 |
-| compute_freqs | 1 | 1 | 0 | 0 | 2 |
-| softmax (standalone) | 0 | 1 | 1 | 13 | 14 |
+| Kernel | Encode | First Decode | Per Step (growing) | Total (~) |
+|--------|:------:|:------------:|:------------------:|:---------:|
+| layernorm_kernel | 64 | 0 | 0 | 64 |
+| rmsnorm_kernel | 0 | 56 | 56 | ~784 |
+| gelu_kernel | 33 | 0 | 0 | 33 |
+| silu_kernel | 0 | 28 | 28 | ~392 |
+| linear (cuBLAS bf16) | ~160 | ~168 | ~168 | ~2512 |
+| flash_attention_kernel | 32 | 28 | 28 | ~424 |
+| compute_freqs | 1 | 1 | 1 | ~15 |
+| softmax (standalone) | 0 | 1 | 1 | ~14 |
 
-Note: gelu_kernel count includes 32 from encoder `EncoderMLP` (when fused, this
-becomes part of `linear_gelu_kernel` instead) + 1 from projector `LinearGELU`
-(unfused, so standalone gelu_kernel).
+Note: gelu_kernel count = 32 from encoder fc1→gelu + 1 from projector linear_1→act.
+These are standalone `gelu()` calls, NOT fused (model.py doesn't use EncoderMLP/LinearGELU).
 
-**Key difference from no-KV-cache path:** With KV cache, each decode step's
-attention operates on a (1, heads, 1, head_dim) query against the growing
-cached KV, instead of reprocessing the entire sequence. The compute per
-decode step is O(1) in sequence length (for everything except attention,
-which is O(n) for reading cached keys — but this is just reading, not
-recomputing through 28 layers).
+---
+
+## 10. Optimization Sources
+
+Optimizations adopted or planned from analysis of other branches:
+
+### Currently Active
+| Optimization | Source | Description |
+|-------------|--------|-------------|
+| cuBLAS backend | **majed**, **yash/optimize** | `F.linear` for all Linear layers |
+| bfloat16 weights | **yash/optimize**, **majed** | Cache bf16 copies, halve memory traffic |
+| Flash Attention | **majed**, **meave** | Triton kernel with online softmax |
+| Fused SwiGLU | **yash/optimize** | Single kernel for gate+up in decoder MLP |
+| TF32 flags | Common | `allow_tf32`, `set_float32_matmul_precision("high")` |
+
+### Adopted (tested, confirmed improvement)
+| Optimization | Source | Actual Impact |
+|-------------|--------|---------------|
+| Fused Q+K RoPE pair kernel | **meave** | **-14ms** (138→124ms) |
+| bf16 RMSNorm output kernel | **meave** (adapted for bf16) | **-3ms** (124→121ms) |
+
+### Rejected (tested, did not help on RTX 5090)
+| Optimization | Source | Result |
+|-------------|--------|--------|
+| SwiGLU grid swizzling | **yash/optimize** | +18ms regression with GROUP_SIZE_M=8, 1D grid |
+| @triton.autotune GELU/SiLU | **majed** | +0.7ms tuning overhead |
+
+### Not Applicable
+| Optimization | Source | Why Not |
+|-------------|--------|---------|
+| EncoderMLP.FUSED | yash/optimize | model.py (origin/main) doesn't use EncoderMLP class |
+| LinearGELU.FUSED | yash/optimize | model.py (origin/main) doesn't use LinearGELU class |
+| flash_decode_kernel | meave | No KV cache in origin/main generate() |
+| generate_v8b | origin/ankush | Not in origin/main model.py |
