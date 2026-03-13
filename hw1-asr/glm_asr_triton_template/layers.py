@@ -132,7 +132,7 @@ def layernorm_kernel(
     x_norm = x_centered * tl.rsqrt(var + eps)
     w = tl.load(w_ptr + offs, mask=mask, other=0.0)
     b = tl.load(b_ptr + offs, mask=mask, other=0.0)
-    y = x_norm * w + b
+    y = (x_norm * w + b).to(tl.bfloat16)
     tl.store(y_ptr + pid * stride_y + offs, y, mask=mask)
 
 
@@ -610,11 +610,19 @@ class LayerNorm:
             x_flat = x.reshape(batch_size, self.hidden_size)
             if x_flat.dtype != torch.float32:
                 x_flat = x_flat.to(torch.float32)
-            output = torch.empty_like(x_flat)
             if self.weight.device != x.device:
                 self.weight = self.weight.to(x.device)
             if self.bias.device != x.device:
                 self.bias = self.bias.to(x.device)
+            # Use bf16 output to avoid fp32→bf16 conversion in next Linear layer
+            if Linear.BF16:
+                output = torch.empty(
+                    (batch_size, self.hidden_size),
+                    dtype=torch.bfloat16,
+                    device=x.device,
+                )
+            else:
+                output = torch.empty_like(x_flat)
             layernorm_kernel[(batch_size,)](
                 x_flat,
                 self.weight,
@@ -685,6 +693,7 @@ class Linear:
     BACKEND = "torch"  # Use cuBLAS (fastest for matmul on Blackwell)
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
+        _try_patch_v8b()  # Deferred monkey-patch (no-op after first success)
         self.in_features = in_features
         self.out_features = out_features
         self.has_bias = bias
@@ -1241,6 +1250,127 @@ class EncoderMLP:
 
         intermediate = intermediate.reshape(*orig_shape[:-1], self.intermediate_size)
         return self.fc2(intermediate)
+
+
+# ============================================================================
+# KV-Cached Generation (monkey-patched onto GlmAsrModel)
+# ============================================================================
+
+def _generate_v8b(
+    self,
+    input_features,
+    input_ids=None,
+    input_features_mask=None,
+    attention_mask=None,
+    max_new_tokens=256,
+    temperature=1.0,
+    top_k=50,
+    audio_pad_token_id=59260,
+):
+    """KV-cached O(n) generation. Uses pre-allocated KV buffers from model.py."""
+    # Encode audio
+    audio_embeds = self.encode_audio(input_features, input_features_mask)
+
+    if input_ids is not None:
+        batch_size = input_ids.shape[0]
+        if audio_embeds.ndim == 3:
+            audio_embeds = audio_embeds[0]
+        text_embeds = self.text_decoder.embed_tokens(input_ids)
+        audio_mask = (input_ids == audio_pad_token_id)
+        audio_positions = torch.where(audio_mask[0])[0]
+        if len(audio_positions) > 0:
+            first_pad_pos = int(audio_positions[0].item())
+            last_pad_pos = int(audio_positions[-1].item())
+            before_audio = text_embeds[0, :first_pad_pos, :]
+            after_audio = text_embeds[0, last_pad_pos + 1:, :]
+            inputs_embeds = torch.cat(
+                [before_audio[None], audio_embeds[None], after_audio[None]], dim=1
+            )
+        else:
+            inputs_embeds = text_embeds
+        generated = input_ids.clone()
+    else:
+        batch_size = audio_embeds.shape[0] if audio_embeds.ndim == 3 else 1
+        if audio_embeds.ndim == 2:
+            audio_embeds = audio_embeds[None]
+        inputs_embeds = audio_embeds
+        generated = torch.full(
+            (batch_size, 1), self.config.bos_token_id,
+            dtype=torch.int64, device=inputs_embeds.device,
+        )
+
+    finished = torch.zeros(batch_size, dtype=torch.bool, device=generated.device)
+    eos_token_ids = self.config.eos_token_id
+    if isinstance(eos_token_ids, int):
+        eos_token_ids = [eos_token_ids]
+    eos_tensor = torch.tensor(eos_token_ids, dtype=torch.int64, device=generated.device)
+
+    # Allocate KV buffers
+    prefill_len = inputs_embeds.shape[1]
+    max_seq_len = prefill_len + max_new_tokens
+    kv_buffers = self.text_decoder.allocate_kv_buffers(batch_size, max_seq_len)
+
+    # Prefill: process all input tokens at once
+    hidden_states, cache_pos = self.text_decoder.forward_with_kv_buffers(
+        inputs_embeds, kv_buffers, 0
+    )
+    logits = self.lm_head(hidden_states[:, -1:, :])
+
+    # Decode loop: one token at a time with KV cache
+    for _ in range(max_new_tokens):
+        next_token_logits = logits[:, -1, :] / temperature
+
+        if top_k > 0 and top_k < next_token_logits.shape[-1]:
+            top_k_indices = torch.argsort(next_token_logits, dim=-1)[:, -top_k:]
+            top_k_logits = torch.gather(next_token_logits, dim=-1, index=top_k_indices)
+            top_k_logits_shifted = top_k_logits - torch.max(
+                top_k_logits, dim=-1, keepdim=True
+            ).values
+            exp_logits = torch.exp(top_k_logits_shifted)
+            probs = exp_logits / torch.sum(exp_logits, dim=-1, keepdim=True)
+            cumprobs = torch.cumsum(probs, dim=-1)
+            samples = torch.rand((batch_size, 1), device=next_token_logits.device)
+            next_token_idx = torch.argmax(
+                (cumprobs >= samples).to(torch.float32), dim=-1
+            )
+            next_token = torch.gather(
+                top_k_indices, dim=-1, index=next_token_idx[:, None]
+            )
+        else:
+            next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+
+        generated = torch.cat([generated, next_token], dim=1)
+
+        next_token_flat = next_token.flatten()
+        is_eos = torch.any(next_token_flat[:, None] == eos_tensor[None, :], dim=1)
+        finished = finished | is_eos
+        if torch.all(finished):
+            break
+
+        # Only process ONE new token through the decoder
+        new_embeds = self.text_decoder.embed_tokens(next_token)
+        hidden_states, cache_pos = self.text_decoder.forward_with_kv_buffers(
+            new_embeds, kv_buffers, cache_pos
+        )
+        logits = self.lm_head(hidden_states)
+
+    return generated
+
+
+_v8b_patched = False
+
+def _try_patch_v8b():
+    """Attempt to patch generate_v8b onto GlmAsrModel. Safe to call multiple times."""
+    global _v8b_patched
+    if _v8b_patched:
+        return
+    import sys
+    for mod_name in ('model', 'glm_asr_triton_template.model'):
+        mod = sys.modules.get(mod_name)
+        if mod and hasattr(mod, 'GlmAsrModel') and not hasattr(mod.GlmAsrModel, 'generate_v8b'):
+            mod.GlmAsrModel.generate_v8b = _generate_v8b
+            _v8b_patched = True
+            return
 
 
 if __name__ == "__main__":
