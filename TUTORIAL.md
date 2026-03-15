@@ -211,15 +211,15 @@ supported GPUs, giving ~10x speedup over regular FP32 multiply-add.
 
 ### Phase 4: Attention Kernels
 
-#### 4.7-4.9 Legacy Attention Kernels
+#### 4.7-4.9 Legacy Attention Kernels (REMOVED)
 
-The original assignment has three separate attention kernels:
+The original assignment had three separate attention kernels:
 - **Attention Scores**: `Q @ K^T * scale` per query position
 - **Softmax In-Place**: writes softmax back to input buffer
 - **Attention Output**: `attn_weights @ V` weighted sum
 
-These still exist in the codebase but are **superseded by the fused Flash Attention
-kernel** (see Section 4.10).
+These were **removed** from the codebase (Session 7, ~175 lines) — they were fully
+superseded by the fused Flash Attention kernel and never invoked at runtime.
 
 #### 4.10 Fused Flash Attention Kernel (Advanced)
 
@@ -312,12 +312,18 @@ Linear.BF16 = True  # Class default in layers.py
 Caches bf16 copies of weights. Must be set as class default (not just `__init__.py`)
 because `__init__.py` is not always executed during benchmark imports.
 
-### 6.5 Fused Flash Attention
-Single Triton kernel with online softmax. Tile sizes chosen per head_dim:
-- `head_dim=64` (encoder): `BLOCK_M=128, BLOCK_N=64`
-- `head_dim=128` (decoder): `BLOCK_M=64, BLOCK_N=32`
+### 6.5 Fused Flash Attention (GPU-Tier Aware)
+Single Triton kernel with online softmax. Tile sizes set by GPU tier:
 
-`num_stages=1` to prevent shared memory overflow on RTX 5090 (101KB limit).
+**Consumer GPUs** (RTX 4090/5090, ~100KB shared mem):
+- `head_dim=64` (encoder): `BLOCK_M=128, BLOCK_N=64`, `num_stages=1, num_warps=4`
+- `head_dim=128` (decoder): `BLOCK_M=64, BLOCK_N=32`, `num_stages=1, num_warps=4`
+
+**Datacenter GPUs** (H200/B200, ~228KB shared mem):
+- Larger tiles, `num_stages=2, num_warps=8`
+
+For **KV-cached decode steps** (seq_q ≤ 4), SDPA fallback is used instead of the
+Triton kernel — avoids kernel launch overhead for tiny problems (-3ms).
 
 ### 6.6 bf16 Kernel Outputs
 ```python
@@ -340,10 +346,14 @@ Datacenter GPUs (~228KB) get larger tiles + num_stages=2.
 ### 6.8 KV-Cached Generation (generate_v8b)
 ```python
 # Monkey-patched onto GlmAsrModel from layers.py
-# Uses origin/main model.py's existing KV cache infrastructure
-model.generate_v8b(input_features, input_ids=input_ids, ...)
+# Uses model.decode(use_cache=True) per instructor guidance
+logits, past_kv = self.decode(inputs_embeds=..., use_cache=True)       # Prefill
+logits, past_kv = self.decode(inputs_embeds=new_embeds,                # Decode loop
+                              past_key_values=past_kv, use_cache=True)
 ```
 Prefills once, then processes 1 new token per decode step (O(n) vs O(n²)).
+Uses `decode(use_cache=True)` which returns `(logits, past_key_values)` —
+the concatenation-based KV cache from model.py's `TextDecoder.__call__`.
 
 ### 6.9 Optimization Results Summary
 
@@ -353,10 +363,14 @@ Prefills once, then processes 1 new token per decode step (O(n) vs O(n²)).
 | bf16 RMSNorm output | **meave** (adapted) | **-3ms** | ADOPTED |
 | bf16 LayerNorm output | internal | **-0.7ms** | ADOPTED |
 | generate_v8b (KV cache) | internal | **-7.6ms** | ADOPTED |
+| SDPA fallback for seq_q≤4 | internal | **-3ms** | ADOPTED |
 | Runtime GPU detection | internal | portability | ADOPTED |
+| Dead code cleanup | internal | -320 lines | ADOPTED |
 | Swizzled SwiGLU | **yash/optimize** | +18ms regression | Rejected |
 | @triton.autotune (lightweight) | **majed** | +0.7ms overhead | Rejected |
 | @triton.autotune (heavy kernels) | internal | massive regression | Rejected |
+| Softmax bf16 output | internal | 0ms (not in hot path) | Rejected |
+| Flash Attention num_stages=2 | **yash/optimize** | OOM on consumer GPUs | Rejected |
 
 ---
 
@@ -374,11 +388,11 @@ Prefills once, then processes 1 new token per decode step (O(n) vs O(n²)).
 
 ---
 
-## 8. Performance Results (RTX 5090, 2026-03-13)
+## 8. Performance Results (RTX 5090, 2026-03-15)
 
 | Implementation | Time | Speed | vs Baseline |
 |----------------|------|-------|-------------|
-| Our template (with KV cache) | **113.5ms** | 8.73ms/tok | **56.6% faster** |
+| Our template (with KV cache + SDPA) | **110.0ms** | 8.46ms/tok | **57.9% faster** |
 | Our template (without KV cache) | **120.7ms** | 9.29ms/tok | **53.8% faster** |
 | Example baseline | 261.3ms | 20.10ms/tok | -- |
 | CPU fallback (no GPU) | ~14,000ms | ~1,000ms/tok | -- |
@@ -386,14 +400,17 @@ Prefills once, then processes 1 new token per decode step (O(n) vs O(n²)).
 Key optimizations ranked by impact:
 1. **cuBLAS-backed `F.linear`** + TF32 flags — cuBLAS outperforms Triton linear kernel
 2. **bfloat16 weights** — halves memory traffic for decode matmuls
-3. **Fused Flash Attention** — Triton kernel with online softmax
+3. **Fused Flash Attention** — Triton kernel with online softmax (GPU-tier aware tiles)
 4. **Fused Q+K RoPE pair kernel** — single kernel for both Q and K rotations (-14ms)
-5. **Fused SwiGLU** — reduces kernel launch overhead for decoder MLP
-6. **generate_v8b with KV cache** — O(n) decode instead of O(n²) (-7.6ms)
+5. **generate_v8b with KV cache** — O(n) decode instead of O(n²) (-7.6ms)
+6. **Fused SwiGLU** — reduces kernel launch overhead for decoder MLP
+7. **SDPA fallback for decode** — PyTorch SDPA for seq_q≤4 (-3ms)
 
 Detailed profiling shows decoder decode steps dominate (82.8% of total time with
 50 tokens) because stock `generate()` is O(n²). The `generate_v8b` KV-cached path
 reduces this by caching K/V states and only processing 1 new token per step.
+SDPA fallback further saves ~3ms by avoiding Triton kernel launch overhead for
+the tiny single-token decode attention calls.
 
 ---
 

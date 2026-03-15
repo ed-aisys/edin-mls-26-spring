@@ -1,7 +1,7 @@
 # Claude Development Log
 
 ## Project: GLM-ASR Triton GPU Kernel Implementation
-**Date:** 2026-03-09 to 2026-03-13
+**Date:** 2026-03-09 to 2026-03-15
 **Branch:** `ankush`
 **GPU:** NVIDIA GeForce RTX 5090 (Blackwell, sm_120, 32GB VRAM)
 **CUDA Toolkit:** 13.0 | **Driver:** 580.126.20
@@ -15,8 +15,8 @@ Completed all 10 Triton kernel implementations + 1 fused Flash Attention kernel 
 GLM-ASR speech-to-text model. The project is a University of Edinburgh MLS course assignment
 implementing GPU kernels for a multi-modal transformer (audio encoder + text decoder).
 
-**Current benchmark: 113.5ms average, 100% transcription accuracy.**
-**Baseline: 261.3ms → 56.6% faster.**
+**Current benchmark: 110.0ms average, 100% transcription accuracy.**
+**Baseline: 261.3ms → 57.9% faster.**
 
 ---
 
@@ -88,20 +88,24 @@ implementing GPU kernels for a multi-modal transformer (audio encoder + text dec
 - Numerically stable: subtract max before exp to prevent overflow
 - Grid: (num_rows,), one block per row
 
-#### 3.2 `attention.py` — 4 kernels (3 legacy + 1 fused)
+#### 3.2 `attention.py` — 1 fused kernel + SDPA fallback
 
 **flash_attention_kernel** (PRIMARY): Fused Flash Attention with online softmax
-- Single kernel launch replaces the 3-kernel approach and SDPA
+- Single kernel launch replaces the old 3-kernel approach and SDPA
 - Online softmax: running max `m_i`, running sum `l_i`, accumulator rescaling
 - `tl.dot` for Q@K^T and P@V (tensor cores)
 - Supports causal (`IS_CAUSAL`), attention mask (`HAS_MASK`), and arbitrary seq lengths
-- Tile sizes: BLOCK_M=128/BLOCK_N=64 for head_dim≤64 (encoder), BLOCK_M=64/BLOCK_N=32 for head_dim=128 (decoder)
-- `num_stages=1` to stay within 101KB shared memory limit
+- Tile sizes: GPU-tier aware (consumer: 128/64 encoder, 64/32 decoder; datacenter: larger)
+- `num_stages=1` on consumer GPUs, `num_stages=2` on datacenter
 - Grid: (cdiv(seq_q, BLOCK_M), batch_heads)
 
-**attention_scores_kernel** (legacy): `scores = sum(K * Q[broadcast], dim=-1) * scale`
-**softmax_inplace_kernel** (legacy): In-place numerically stable softmax
-**attention_output_kernel** (legacy): `output = sum(V * weights[:, None], dim=0)`
+**SDPA fallback** for KV-cached decode: `torch.nn.functional.scaled_dot_product_attention`
+- Used when `seq_q <= 4` (single-token decode steps) — avoids Triton kernel launch overhead
+- Impact: **-3ms** on decode steps
+
+**Legacy kernels REMOVED** (Session 7): `attention_scores_kernel`, `softmax_inplace_kernel`,
+`attention_output_kernel`, `causal_mask_kernel` — ~175 lines of dead code removed.
+These were superseded by `flash_attention_kernel` and never invoked.
 
 #### 3.3 `rope.py` — 1 kernel
 
@@ -143,12 +147,16 @@ Linear.BF16 = True  # Class attribute default in layers.py
 Caches bfloat16 copies of weights. All matmuls via `F.linear` run in bf16,
 halving memory traffic. Results cast back to float32.
 
-#### 4.6 Flash Attention Tile Sizes
+#### 4.6 Flash Attention Tile Sizes (GPU-Tier Aware)
 ```python
+# Consumer GPUs (RTX 4090/5090, ~100KB shared mem):
 if head_dim <= 64:   BLOCK_M, BLOCK_N = 128, 64   # Encoder
 else:                BLOCK_M, BLOCK_N = 64, 32     # Decoder
+# num_stages=1, num_warps=4
+
+# Datacenter GPUs (H200/B200, ~228KB shared mem):
+# Larger tiles + num_stages=2, num_warps=8
 ```
-`num_stages=1` prevents double-buffering that would exceed shared memory.
 
 ### Step 5: Environment Fixes (Session 2, 2026-03-10)
 
@@ -186,9 +194,9 @@ else:                BLOCK_M, BLOCK_N = 64, 32     # Decoder
 #### 7.2 Student Benchmark
 | Metric | Value |
 |--------|-------|
-| **Average time** | **113.5ms** (+/- 0.1ms) |
+| **Average time** | **110.0ms** (+/- 0.2ms) |
 | **Tokens** | 13 |
-| **Speed** | 8.73 ms/token |
+| **Speed** | 8.46 ms/token |
 | **Accuracy** | 100.0% |
 
 ### Step 8: Branch Optimizations (Session 5, 2026-03-12)
@@ -216,8 +224,10 @@ else:                BLOCK_M, BLOCK_N = 64, 32     # Decoder
 - Impact: **-0.7ms** (121.8→121.1ms) — small because encoder only runs once
 
 #### 9.2 generate_v8b with KV Cache (monkey-patched)
-- Wrote `_generate_v8b()` in layers.py — uses origin/main model.py's existing KV cache infrastructure
-- `forward_with_kv_buffers()` and `allocate_kv_buffers()` already exist in model.py
+- Wrote `_generate_v8b()` in layers.py — uses `model.decode(use_cache=True)` per instructor guidance
+- `decode()` with `use_cache=True` returns `(logits, past_key_values)` — concatenation-based KV cache
+- Prefill: `logits, past_kv = self.decode(inputs_embeds=..., use_cache=True)`
+- Decode loop: `logits, past_kv = self.decode(inputs_embeds=new_embeds, past_key_values=past_kv, use_cache=True)`
 - Deferred monkey-patch via `_try_patch_v8b()` called in `Linear.__init__` — avoids circular imports
 - Benchmark detects it via `hasattr(model, 'generate_v8b')` (already built into benchmark_student.py)
 - Impact: **-7.6ms** (121.1→113.5ms) — KV cache eliminates redundant decoder computation
@@ -226,6 +236,42 @@ else:                BLOCK_M, BLOCK_N = 64, 32     # Decoder
 - yash/optimize model.py is **identical** to origin/main (no KV cache usage)
 - Their speed advantage comes from: aggressive bf16 in all kernels, `num_stages=2`,
   `num_warps=8` in flash attention (tuned for H200 with 228KB shared memory)
+
+### Step 10: SDPA Fallback + GPU Portability + Dead Code Cleanup (Session 7, 2026-03-15)
+
+#### 10.1 Systematic Optimization Testing (6 optimizations tested)
+Tested all remaining optimization ideas from other branches:
+
+| Optimization | Result | Impact |
+|-------------|--------|--------|
+| **SDPA fallback for seq_q≤4** | **ADOPTED** | **-3ms** (113.5→110.0ms) |
+| Softmax bf16 output | No change | 0ms (softmax only used for final logits) |
+| Flash Attention num_stages=2 | Rejected | OOM on consumer GPUs (~100KB shared mem) |
+| Flash Attention num_warps=8 | No change | 0ms (already using 4 warps on consumer) |
+| PyTorch GELU/SiLU bf16 | Rejected | +0.3ms (Triton kernels faster) |
+| SDPA fallback for all attention | Rejected | +5ms (Flash Attention better for long seqs) |
+
+#### 10.2 SDPA Fallback for KV-Cached Decode
+- Added `torch.nn.functional.scaled_dot_product_attention` fallback in attention.py
+- Triggered when `seq_q <= 4` (single-token KV-cached decode steps)
+- Avoids Triton kernel launch overhead for tiny problem sizes
+- Impact: **-3ms** (113.5→110.0ms)
+
+#### 10.3 GPU Portability (All Modules)
+- `_detect_gpu_tier()` in layers.py checks `props.max_shared_memory_size_per_block > 120 * 1024`
+- Applied to: Linear tile sizes, Flash Attention tiles + num_stages + num_warps, RoPE num_stages + num_warps
+- Consumer GPUs (RTX 4090/5090): smaller tiles, num_stages=1, num_warps=4
+- Datacenter GPUs (H200/B200): larger tiles, num_stages=2, num_warps=8
+
+#### 10.4 Dead Code Cleanup
+- Removed ~175 lines from attention.py: `attention_scores_kernel`, `softmax_inplace_kernel`, `attention_output_kernel`, `causal_mask_kernel`
+- Removed ~145 lines from layers.py: same legacy kernels that were duplicated
+- These were never invoked — fully superseded by `flash_attention_kernel`
+
+#### 10.5 generate_v8b Updated to Use decode(use_cache=True)
+- Per Piazza instructor guidance: "use an existing separate decode function and handle the KV cache management yourself"
+- Changed from `forward_with_kv_buffers()` to `self.decode(inputs_embeds=..., past_key_values=past_kv, use_cache=True)`
+- Same performance, cleaner approach using model.py's public API
 
 ---
 
@@ -237,6 +283,7 @@ else:                BLOCK_M, BLOCK_N = 64, 32     # Decoder
 |----------|-------------|---------------|---------------|--------|
 | HIGH | Fused Q+K RoPE kernel | meave | **-14ms** (138→124ms) | **ADOPTED** |
 | HIGH | bf16 RMSNorm output | meave (adapted) | **-3ms** (124→121ms) | **ADOPTED** |
+| HIGH | SDPA fallback for seq_q≤4 | majed (idea) | **-3ms** (113.5→110.0ms) | **ADOPTED** |
 | MEDIUM | Swizzled SwiGLU + larger tiles | yash/optimize | **+18ms regression** (123→141ms) | Rejected |
 | LOW | @triton.autotune for GELU/SiLU | majed | **+0.7ms overhead** (tuning warmup) | Rejected |
 | N/A | EncoderMLP.FUSED | yash/optimize | NOT APPLICABLE — model.py doesn't use EncoderMLP | Skipped |
@@ -251,12 +298,12 @@ else:                BLOCK_M, BLOCK_N = 64, 32     # Decoder
 
 ## Benchmark Results
 
-### Current (2026-03-13, with KV-cached generate_v8b)
+### Current (2026-03-15, with KV-cached generate_v8b + SDPA fallback)
 | Implementation | Time | Speed | Accuracy |
 |----------------|------|-------|----------|
-| **Our template** | **113.5ms** | 8.73ms/tok | 100% |
+| **Our template** | **110.0ms** | 8.46ms/tok | 100% |
 | Example baseline | 261.3ms | 20.10ms/tok | 100% |
-| **Speedup** | **56.6%** | | |
+| **Speedup** | **57.9%** | | |
 
 ### Optimization Progression
 | Change | Time | Delta |
@@ -267,11 +314,13 @@ else:                BLOCK_M, BLOCK_N = 64, 32     # Decoder
 | Fused Q+K RoPE pair kernel (from meave) | 124.6ms | -11.8ms |
 | bf16 RMSNorm output kernel (from meave) | 120.7ms | -3.9ms |
 | bf16 LayerNorm output | 121.1ms | -0.7ms |
-| generate_v8b with KV cache (monkey-patched) | **113.5ms** | **-7.6ms** |
+| generate_v8b with KV cache (monkey-patched) | 113.5ms | -7.6ms |
+| SDPA fallback for KV-cached decode (seq_q≤4) | **110.0ms** | **-3.5ms** |
 
-Note: generate_v8b uses the KV cache infrastructure already in origin/main model.py
-(`forward_with_kv_buffer`, `allocate_kv_buffers`). The function itself lives in layers.py
-and is monkey-patched onto GlmAsrModel via a deferred hook in Linear.__init__.
+Note: generate_v8b uses `model.decode(use_cache=True)` per instructor guidance.
+The function lives in layers.py and is monkey-patched onto GlmAsrModel via a deferred
+hook in Linear.__init__. SDPA fallback uses `torch.nn.functional.scaled_dot_product_attention`
+for single-token decode steps, avoiding Triton kernel launch overhead.
 
 ---
 
@@ -379,44 +428,41 @@ sequence, it:
 Then we monkey-patched it onto the model:
 
 ```python
-# In layers.py (the old approach on origin/ankush):
+# In layers.py (current approach, per instructor guidance):
 def _generate_v8b(self, input_features, input_ids=None, ...):
-    # ... KV-cached generation code ...
-    kv_buffers = self.text_decoder.allocate_kv_buffers(batch_size, max_len)
-    hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(...)
+    # ... KV-cached generation code using decode(use_cache=True) ...
+    # Prefill: process all input tokens
+    logits, past_kv = self.decode(inputs_embeds=inputs_embeds, use_cache=True)
     for _ in range(max_new_tokens):
         # Only 1 token through decoder each step!
-        hidden, cache_pos = self.text_decoder.forward_with_kv_buffers(
-            next_embeds, kv_buffers, cache_pos
+        new_embeds = self.text_decoder.embed_tokens(next_token)
+        logits, past_kv = self.decode(
+            inputs_embeds=new_embeds, past_key_values=past_kv, use_cache=True
         )
 
-def _try_patch_model():
-    """Monkey-patch generate_v8b onto GlmAsrModel at import time."""
-    from . import model
-    model.GlmAsrModel.generate_v8b = _generate_v8b
+def _try_patch_v8b():
+    """Deferred monkey-patch: called from Linear.__init__ to avoid circular imports."""
+    import sys
+    mod = sys.modules.get('model')
+    if mod and hasattr(mod, 'GlmAsrModel'):
+        mod.GlmAsrModel.generate_v8b = _generate_v8b
 ```
 
 When `benchmark_student.py` checked `hasattr(model, 'generate_v8b')`, it would find
 our monkey-patched method and use it instead of the stock `generate()`.
 
-**Result:** 110.0ms with KV cache vs 136.4ms without — the KV cache eliminated
-redundant computation in decode steps.
+**Result:** 110.0ms with KV cache + SDPA fallback vs 120.7ms without — the KV cache
+eliminated redundant computation in decode steps, and SDPA fallback avoided Triton
+kernel launch overhead for single-token decode.
 
-### Why We Stopped (and Re-enabled)
+### Evolution of the Approach
 
-Initially we monkey-patched by adding `generate_v8b` directly to model.py on origin/ankush.
-When we discovered model.py must match origin/main, we had to remove it.
+1. **First attempt:** Added `generate_v8b` directly to model.py — violated GUIDE.md Rule 4
+2. **Second attempt:** Used `forward_with_kv_buffers()` via monkey-patch from layers.py
+3. **Final approach (per instructor Piazza guidance):** Use `model.decode(use_cache=True)` — cleaner,
+   uses model.py's public API. `decode()` internally handles `past_key_values` concatenation.
 
-**However**, origin/main model.py already contains KV cache infrastructure:
-- `TextDecoderLayer.forward_with_kv_buffer()` (line 318)
-- `TextDecoder.forward_with_kv_buffers()` (line 492)
-- `TextDecoder.allocate_kv_buffers()` (line 534)
-
-The stock `generate()` simply doesn't call these methods. So we re-enabled generate_v8b
-using a **deferred monkey-patch** — the function lives in layers.py and gets patched
-onto `GlmAsrModel` at runtime via `_try_patch_v8b()` called in `Linear.__init__()`.
-
-**Result:** 113.5ms with KV cache vs 120.7ms without.
+**Result:** 110.0ms with KV cache + SDPA fallback vs 120.7ms without.
 
 ### Compliance Question
 
@@ -425,8 +471,9 @@ It adds a NEW method (`generate_v8b`) to the class at runtime. The benchmark
 already checks for this method (`hasattr(model, 'generate_v8b')`).
 
 Whether this is allowed under GUIDE.md Rule 4 ("Do NOT modify model.py") is
-debatable — we are asking the professor for clarification. Two branches exist:
-- `ankush` — with monkey-patch (113.5ms)
+debatable. Instructor guidance on Piazza: "use an existing separate decode function
+and handle the KV cache management yourself." Two branches exist:
+- `ankush` — with monkey-patch + SDPA fallback (110.0ms)
 - `ankush-no-monkeypatch` — without monkey-patch (120.7ms)
 
 ---
@@ -492,11 +539,12 @@ simply doesn't call.
    `attention_mask is None`, falling back to legacy 3-kernel path for masked attention.
    Simpler flash kernel may compile faster.
 
-**Actionable items to test:**
-- [ ] LayerNorm bf16 output (like our RMSNorm bf16)
-- [ ] Softmax bf16 output
-- [ ] Re-enable EncoderMLP.FUSED = True
-- [ ] Test num_stages=2 on RTX 5090 (may OOM on shared memory)
+**Actionable items (tested in Session 7):**
+- [x] LayerNorm bf16 output — **DONE** (Session 6, -0.7ms)
+- [x] Softmax bf16 output — **TESTED, no impact** (softmax only for final logits)
+- [x] Test num_stages=2 on RTX 5090 — **TESTED, OOM** (exceeds ~100KB shared memory)
+- [x] Test num_warps=8 — **TESTED, no change** on RTX 5090
+- N/A: EncoderMLP.FUSED — model.py doesn't use EncoderMLP class
 
 ### 3. Autotune Attempt and Failure (2026-03-13)
 
@@ -528,13 +576,15 @@ def _detect_gpu_tier():
 _GPU_TIER = _detect_gpu_tier()
 ```
 
-Applied to: Flash Attention tile sizes, SwiGLU tile sizes, EncoderMLP tile sizes.
-Consumer GPUs get smaller tiles + num_stages=1; datacenter GPUs get larger tiles + num_stages=2.
+Applied to: Flash Attention tile sizes + num_stages + num_warps, SwiGLU tile sizes,
+Linear tile sizes, RoPE num_stages + num_warps.
+Consumer GPUs get smaller tiles + num_stages=1 + num_warps=4;
+datacenter GPUs get larger tiles + num_stages=2 + num_warps=8.
 
 ### 5. Further Kernel Optimizations (Lower Priority)
-- Softmax bf16 output
-- SDPA fallback for single-token decode (faster than Flash Attention for seq_len=1)
-- Fuse encoder fc1→gelu into single kernel
+- [x] ~~SDPA fallback for single-token decode~~ — **DONE** (Session 7, -3ms)
+- [x] ~~Softmax bf16 output~~ — **TESTED, no impact** (softmax only for final logits)
+- Fuse encoder fc1→gelu into single kernel (model.py doesn't use EncoderMLP, so limited benefit)
 - Profile individual kernels to find remaining hotspots
 
 ### 4. Correction: origin/main model.py Has KV Cache Infrastructure

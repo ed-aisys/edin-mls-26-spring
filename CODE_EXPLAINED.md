@@ -264,29 +264,50 @@ output = acc / l_i                  # final normalization
 3. **O(BLOCK) SRAM** — memory-efficient for long sequences.
 4. **Tensor cores** — `tl.dot` for both Q@K^T and P@V.
 
-**Tile sizes** (chosen to fit 101KB shared memory):
-- Encoder (head_dim=64): `BLOCK_M=128, BLOCK_N=64`
-- Decoder (head_dim=128): `BLOCK_M=64, BLOCK_N=32`
-- `num_stages=1` — prevents double-buffering overflow
+**Tile sizes** (GPU-tier aware):
+- **Consumer GPUs** (RTX 4090/5090, ~100KB shared mem):
+  - Encoder (head_dim=64): `BLOCK_M=128, BLOCK_N=64`, `num_stages=1, num_warps=4`
+  - Decoder (head_dim=128): `BLOCK_M=64, BLOCK_N=32`, `num_stages=1, num_warps=4`
+- **Datacenter GPUs** (H200/B200, ~228KB shared mem):
+  - Larger tiles, `num_stages=2, num_warps=8`
 
 **Features:**
 - `IS_CAUSAL` (constexpr): causal masking for decoder
 - `HAS_MASK` (constexpr): additive attention mask bias (zero overhead when False)
 - Supports arbitrary sequence lengths
 
-### 3.3 Legacy Attention Kernels
+### 3.3 SDPA Fallback for KV-Cached Decode
 
-Three legacy kernels from the original assignment (superseded by Flash Attention):
-1. **`attention_scores_kernel`**: Q @ K^T * scale
-2. **`softmax_inplace_kernel`**: In-place softmax
-3. **`attention_output_kernel`**: attn_weights @ V
+For single-token decode steps (seq_q ≤ 4) during KV-cached generation, the Triton
+Flash Attention kernel's launch overhead dominates. Instead, we fall back to
+`torch.nn.functional.scaled_dot_product_attention` (PyTorch's SDPA), which uses
+cuDNN/cuBLAS internally and avoids the Triton compilation/launch path.
 
-### 3.4 Grouped Query Attention (GQA)
+```python
+if q.is_cuda and seq_q <= 4:
+    return torch.nn.functional.scaled_dot_product_attention(
+        q, k, v, attn_mask=attention_mask, is_causal=is_causal, scale=scale
+    )
+```
+
+**Impact:** -3ms on decode steps (113.5ms → 110.0ms).
+
+### 3.4 Legacy Attention Kernels (REMOVED)
+
+Three legacy kernels from the original assignment were **removed** (~175 lines):
+1. ~~`attention_scores_kernel`~~: Q @ K^T * scale
+2. ~~`softmax_inplace_kernel`~~: In-place softmax
+3. ~~`attention_output_kernel`~~: attn_weights @ V
+4. ~~`causal_mask_kernel`~~: Causal mask generation
+
+These were never invoked at runtime — fully superseded by `flash_attention_kernel`.
+
+### 3.5 Grouped Query Attention (GQA)
 
 The text decoder uses GQA: 16 query heads but only 4 KV heads.
 GQA is handled by `_expand_kv_heads()` before the Flash Attention kernel call.
 
-### 3.5 Numerical Parity Tests
+### 3.6 Numerical Parity Tests
 
 17-case deterministic parity suite in `__main__` block, covering:
 - basic and causal attention at head_dim=64 and head_dim=128
@@ -381,7 +402,9 @@ class TextDecoder:
 - `TextDecoder.allocate_kv_buffers()` (line 534)
 
 The stock `generate()` ignores these methods — each forward pass processes the
-full input sequence. `generate_v8b` (monkey-patched from layers.py) uses them.
+full input sequence. `generate_v8b` (monkey-patched from layers.py) uses
+`decode(use_cache=True)` which internally leverages the KV cache via
+`TextDecoder.__call__`'s `past_key_values` parameter.
 
 ### 5.4 DecoderLayer
 
@@ -397,7 +420,8 @@ Each decoder layer:
 ### 5.5 Generation Pipeline
 
 **`generate()`** is the stock generation method in model.py — O(n²) decode.
-`generate_v8b` is monkey-patched from layers.py (see Section 10).
+`generate_v8b` is monkey-patched from layers.py (see Section 10) and uses
+`decode(use_cache=True)` for O(n) KV-cached generation.
 Stock generate() reprocesses the full growing sequence each step:
 
 ```python
@@ -468,8 +492,8 @@ def check_transcription(transcription, expected):
     # Pass if > 80% word overlap
 ```
 
-### Current Benchmark (RTX 5090, 2026-03-13)
-- With generate_v8b: `113.5ms (+/- 0.1ms)`, `8.73 ms/token`
+### Current Benchmark (RTX 5090, 2026-03-15)
+- With generate_v8b + SDPA fallback: `110.0ms (+/- 0.2ms)`, `8.46 ms/token`
 - Without generate_v8b: `120.7ms (+/- 0.2ms)`, `9.29 ms/token`
 - 13 tokens generated, `100.0%` transcription accuracy
 
@@ -534,12 +558,16 @@ def check_transcription(transcription, expected):
    -> Logits: (1, ~80, 59264)
    -> Take last position: (1, 59264)
    |
-9. Autoregressive Decode (O(n²) — reprocess everything each step)
-   a. Embed new token: (1, 1, 2048)
-   b. Concatenate to full inputs_embeds: (1, N+1, 2048)
-   c. Full forward pass through all 28 decoder layers
-   d. RMSNorm + LM Head -> next token logits
-   -> Generates ~13 tokens for test audio
+9. Autoregressive Decode
+   Stock generate() — O(n²): reprocesses full sequence each step
+   generate_v8b (KV-cached) — O(n): 1 token per step via decode(use_cache=True)
+     a. Prefill: logits, past_kv = decode(inputs_embeds=..., use_cache=True)
+     b. Decode loop:
+        - Embed new token: (1, 1, 2048)
+        - logits, past_kv = decode(inputs_embeds=new_embeds,
+                                    past_key_values=past_kv, use_cache=True)
+        - Attention uses SDPA fallback (seq_q=1) instead of Triton Flash kernel
+     -> Generates ~13 tokens for test audio
    |
 10. Decode token IDs -> text
     -> "Concord returned to its place amidst the tents."
@@ -585,12 +613,14 @@ Optimizations adopted or planned from analysis of other branches:
 | Fused Q+K RoPE pair kernel | **meave** | **-14ms** (138→124ms) |
 | bf16 RMSNorm output kernel | **meave** (adapted for bf16) | **-3ms** (124→121ms) |
 
-### Adopted (2026-03-13)
+### Adopted (2026-03-13 to 2026-03-15)
 | Optimization | Source | Actual Impact |
 |-------------|--------|---------------|
 | bf16 LayerNorm output | internal | **-0.7ms** (encoder norm stores bf16 directly) |
-| generate_v8b (KV cache) | internal | **-7.6ms** (monkey-patched from layers.py) |
+| generate_v8b (KV cache) | internal | **-7.6ms** (monkey-patched from layers.py, uses decode(use_cache=True)) |
+| SDPA fallback for seq_q≤4 | internal | **-3ms** (PyTorch SDPA for KV-cached decode steps) |
 | Runtime GPU detection | internal | portability (detect shared mem tier at import) |
+| Dead code cleanup | internal | -320 lines (removed legacy attention kernels) |
 
 ### Rejected (tested, did not help on RTX 5090)
 | Optimization | Source | Result |
@@ -599,6 +629,10 @@ Optimizations adopted or planned from analysis of other branches:
 | @triton.autotune GELU/SiLU | **majed** | +0.7ms tuning overhead |
 | @triton.autotune Flash Attention | internal | Massive regression — seq_k changes every decode step with KV cache |
 | @triton.autotune SwiGLU | internal | Regression — wrapper overhead dominates small decode matmuls |
+| Softmax bf16 output | internal | 0ms — softmax only used for final logits (not in hot path) |
+| Flash Attention num_stages=2 | **yash/optimize** | OOM on consumer GPUs (~100KB shared mem) |
+| Flash Attention num_warps=8 | **yash/optimize** | 0ms change on RTX 5090 |
+| PyTorch GELU/SiLU bf16 | internal | +0.3ms — Triton kernels faster |
 
 ### Not Applicable
 | Optimization | Source | Why Not |

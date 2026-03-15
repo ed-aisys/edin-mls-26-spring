@@ -38,7 +38,7 @@ Quick reference for kernel signatures, model architecture, and performance tunin
 | File | Modifiable? | What's In It |
 |------|:-----------:|--------------|
 | `layers.py` | **Yes** | All 6 layer kernels + config knobs + fused kernels + layer classes |
-| `attention.py` | **Yes** | Fused Flash Attention kernel + 3 legacy attention kernels |
+| `attention.py` | **Yes** | Fused Flash Attention kernel + SDPA fallback (legacy kernels removed) |
 | `rope.py` | **Yes** | 1 RoPE kernel |
 | `__init__.py` | **Yes** | Backend/fusion configuration |
 | `model.py` | **No** | Model architecture, stock `generate()` (O(n²), KV cache infra exists but unused) |
@@ -83,14 +83,11 @@ flash_attention_kernel(q_ptr, k_ptr, v_ptr, o_ptr, mask_ptr, scale,
                        stride_ob..od, stride_mb..mk,
                        IS_CAUSAL, HAS_MASK, BLOCK_M, BLOCK_N, BLOCK_D)
 
-# Legacy: Attention Scores — Grid: (batch_heads, seq_q)
-attention_scores_kernel(...)
+# SDPA fallback for KV-cached decode (seq_q <= 4):
+# torch.nn.functional.scaled_dot_product_attention(q, k, v, ...)
 
-# Legacy: Softmax In-place — Grid: (batch_heads * seq_q,)
-softmax_inplace_kernel(...)
-
-# Legacy: Attention Output — Grid: (batch_heads, seq_q)
-attention_output_kernel(...)
+# Legacy kernels (attention_scores, softmax_inplace, attention_output,
+# causal_mask) were REMOVED — superseded by flash_attention_kernel.
 ```
 
 ### rope.py
@@ -162,12 +159,18 @@ layers.EncoderMLP.FUSED = True     # Set but NOT USED (model.py uses plain fc1/f
 Linear.BF16 = True     # Class default in layers.py, halves memory traffic
 ```
 
-### Flash Attention Configuration
+### Flash Attention Configuration (GPU-Tier Aware)
 ```python
-# Tile sizes chosen per head_dim to stay within 101KB shared memory
+# Consumer GPUs (RTX 4090/5090, ~100KB shared mem):
 if head_dim <= 64:   BLOCK_M, BLOCK_N = 128, 64  # Encoder
 else:                BLOCK_M, BLOCK_N = 64, 32    # Decoder
-# num_stages=1 prevents double-buffering overflow
+# num_stages=1, num_warps=4
+
+# Datacenter GPUs (H200/B200, ~228KB shared mem):
+# Larger tiles, num_stages=2, num_warps=8
+
+# SDPA fallback for KV-cached decode (seq_q <= 4):
+# torch.nn.functional.scaled_dot_product_attention — avoids Triton launch overhead
 ```
 
 ---
@@ -190,15 +193,15 @@ python benchmark_detailed.py glm_asr_triton_template
 
 ---
 
-## Benchmark Results (RTX 5090, CUDA 13.0, 2026-03-13)
+## Benchmark Results (RTX 5090, CUDA 13.0, 2026-03-15)
 
 ### Student Benchmark
 | Implementation | Time | Speed | Accuracy |
 |----------------|------|-------|----------|
-| **Our template (with KV cache)** | **113.5ms** | 8.73ms/tok | 100% |
+| **Our template (KV cache + SDPA)** | **110.0ms** | 8.46ms/tok | 100% |
 | Our template (no KV cache) | 120.7ms | 9.29ms/tok | 100% |
 | Example baseline | 261.3ms | 20.10ms/tok | 100% |
-| **Speedup** | **56.6%** | | |
+| **Speedup** | **57.9%** | | |
 
 ### Detailed Benchmark (50 generated tokens)
 | Component | Time | % Total |
@@ -221,10 +224,14 @@ python benchmark_detailed.py glm_asr_triton_template
 | bf16 RMSNorm output | meave (adapted) | **-3ms** | **ADOPTED** |
 | bf16 LayerNorm output | internal | **-0.7ms** | **ADOPTED** |
 | generate_v8b (KV cache) | internal | **-7.6ms** | **ADOPTED** |
+| SDPA fallback for seq_q≤4 | internal | **-3ms** | **ADOPTED** |
 | Runtime GPU detection | internal | portability | **ADOPTED** |
+| Dead code cleanup | internal | -320 lines | **ADOPTED** |
 | Swizzled SwiGLU | yash/optimize | +18ms regression | Rejected |
 | @triton.autotune (lightweight) | majed | +0.7ms overhead | Rejected |
 | @triton.autotune (heavy kernels) | internal | massive regression | Rejected |
+| Softmax bf16 output | internal | 0ms | Rejected |
+| Flash Attention num_stages=2 | yash/optimize | OOM on consumer GPUs | Rejected |
 
 ---
 
@@ -243,10 +250,13 @@ python benchmark_detailed.py glm_asr_triton_template
 - [x] Fused Q+K RoPE pair kernel (from meave) — **-14ms**
 - [x] bf16 RMSNorm output kernel (from meave) — **-3ms**
 - [x] bf16 LayerNorm output — **-0.7ms**
-- [x] generate_v8b with KV cache (monkey-patched) — **-7.6ms**
+- [x] generate_v8b with KV cache (monkey-patched, decode(use_cache=True)) — **-7.6ms**
+- [x] SDPA fallback for KV-cached decode (seq_q≤4) — **-3ms**
 - [x] Runtime GPU detection for cross-GPU portability
+- [x] Dead code cleanup — removed ~320 lines of legacy attention kernels
 - [x] SwiGLU swizzle tested, rejected (+18ms regression on RTX 5090)
 - [x] @triton.autotune tested, rejected (lightweight: +0.7ms overhead; heavy kernels: massive regression)
+- [x] Softmax bf16, num_stages=2, num_warps=8 — tested, no improvement on consumer GPUs
 
 ---
 
