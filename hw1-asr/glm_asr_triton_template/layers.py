@@ -401,146 +401,6 @@ def softmax_kernel(x_ptr, y_ptr, stride_x, stride_y, n_cols, BLOCK_SIZE: tl.cons
     tl.store(y_ptr + row * stride_y + offs, y, mask=mask)
 
 
-@triton.jit
-def attention_scores_kernel(
-    q_ptr,
-    k_ptr,
-    scores_ptr,
-    scale,
-    seq_k,
-    head_dim,
-    stride_q0,
-    stride_q1,
-    stride_q2,
-    stride_k0,
-    stride_k1,
-    stride_k2,
-    stride_s0,
-    stride_s1,
-    stride_s2,
-    BLOCK_K: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    """Compute attention scores: Q @ K^T * scale."""
-    pid_bh = tl.program_id(0)
-    pid_q = tl.program_id(1)
-
-    offs_k = tl.arange(0, BLOCK_K)
-    offs_d = tl.arange(0, BLOCK_D)
-
-    q = tl.load(
-        q_ptr + pid_bh * stride_q0 + pid_q * stride_q1 + offs_d * stride_q2,
-        mask=offs_d < head_dim,
-        other=0.0,
-    )
-    k = tl.load(
-        k_ptr
-        + pid_bh * stride_k0
-        + offs_k[:, None] * stride_k1
-        + offs_d[None, :] * stride_k2,
-        mask=(offs_k[:, None] < seq_k) & (offs_d[None, :] < head_dim),
-        other=0.0,
-    )
-    scores = tl.sum(k * q[None, :], axis=1) * scale
-    tl.store(
-        scores_ptr
-        + pid_bh * stride_s0
-        + pid_q * stride_s1
-        + offs_k * stride_s2,
-        scores,
-        mask=offs_k < seq_k,
-    )
-
-
-@triton.jit
-def attention_output_kernel(
-    weights_ptr,
-    v_ptr,
-    output_ptr,
-    seq_k,
-    head_dim,
-    stride_w0,
-    stride_w1,
-    stride_w2,
-    stride_v0,
-    stride_v1,
-    stride_v2,
-    stride_o0,
-    stride_o1,
-    stride_o2,
-    BLOCK_K: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    """Compute attention output: weights @ V."""
-    pid_bh = tl.program_id(0)
-    pid_q = tl.program_id(1)
-
-    offs_k = tl.arange(0, BLOCK_K)
-    offs_d = tl.arange(0, BLOCK_D)
-
-    w = tl.load(
-        weights_ptr
-        + pid_bh * stride_w0
-        + pid_q * stride_w1
-        + offs_k * stride_w2,
-        mask=offs_k < seq_k,
-        other=0.0,
-    )
-    v = tl.load(
-        v_ptr
-        + pid_bh * stride_v0
-        + offs_k[:, None] * stride_v1
-        + offs_d[None, :] * stride_v2,
-        mask=(offs_k[:, None] < seq_k) & (offs_d[None, :] < head_dim),
-        other=0.0,
-    )
-    out = tl.sum(v * w[:, None], axis=0)
-    tl.store(
-        output_ptr
-        + pid_bh * stride_o0
-        + pid_q * stride_o1
-        + offs_d * stride_o2,
-        out,
-        mask=offs_d < head_dim,
-    )
-
-
-@triton.jit
-def causal_mask_kernel(
-    scores_ptr,
-    seq_k,
-    offset,
-    stride_s0,
-    stride_s1,
-    stride_s2,
-    BLOCK_K: tl.constexpr,
-):
-    """Apply causal mask to attention scores."""
-    pid_bh = tl.program_id(0)
-    pid_q = tl.program_id(1)
-
-    offs_k = tl.arange(0, BLOCK_K)
-    mask = offs_k < seq_k
-    scores = tl.load(
-        scores_ptr
-        + pid_bh * stride_s0
-        + pid_q * stride_s1
-        + offs_k * stride_s2,
-        mask=mask,
-        other=-1e9,
-    )
-    current_pos = pid_q + offset
-    scores = tl.where(offs_k > current_pos, -1e9, scores)
-    tl.store(
-        scores_ptr
-        + pid_bh * stride_s0
-        + pid_q * stride_s1
-        + offs_k * stride_s2,
-        scores,
-        mask=mask,
-    )
-
-
 # ============================================================================
 # Layer Classes
 # ============================================================================
@@ -702,9 +562,11 @@ def get_activation(name: str):
 class Linear:
     """Linear layer with switchable backend (torch or Triton)."""
 
-    TILE_M = 128
-    TILE_N = 128
-    TILE_K = 64
+    # Triton matmul tile sizes (only used when BACKEND="triton")
+    if _GPU_TIER == 'datacenter':
+        TILE_M, TILE_N, TILE_K = 128, 128, 64
+    else:
+        TILE_M, TILE_N, TILE_K = 64, 64, 32
 
     BACKEND = "torch"  # Use cuBLAS (fastest for matmul on Blackwell)
 

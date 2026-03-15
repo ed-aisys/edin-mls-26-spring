@@ -11,6 +11,7 @@ from typing import Optional, Tuple
 import torch
 import triton
 import triton.language as tl
+from layers import _GPU_TIER
 
 
 def get_stream():
@@ -359,8 +360,8 @@ def apply_rotary_pos_emb(
             qo_flat.stride(1), qo_flat.stride(2),
             ko_flat.stride(1), ko_flat.stride(2),
             BLOCK_HD=BLOCK_HD,
-            num_stages=1,
-            num_warps=4,
+            num_stages=2 if _GPU_TIER == 'datacenter' else 1,
+            num_warps=8 if _GPU_TIER == 'datacenter' else 4,
         )
 
         q_out = qo_flat.reshape(batch, num_q_heads, seq_len, head_dim)
