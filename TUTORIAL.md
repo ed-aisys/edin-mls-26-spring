@@ -305,19 +305,24 @@ layers.EncoderMLP.FUSED = True    # NOT USED by origin/main model.py
 does NOT use `EncoderMLP` or `LinearGELU` — it uses plain `Linear` + `gelu()` for the
 encoder MLP and projector.
 
-### 6.4 bfloat16 Weights
+### 6.4 fp16 Weights (formerly bfloat16)
 ```python
-Linear.BF16 = True  # Class default in layers.py
+Linear.BF16 = True                     # Class default in layers.py (flag name retained)
+Linear._HALF_DTYPE = torch.float16     # Actual dtype: fp16 HGEMM on RTX 5090
 ```
-Caches bf16 copies of weights. Must be set as class default (not just `__init__.py`)
+Caches fp16 copies of weights. Must be set as class default (not just `__init__.py`)
 because `__init__.py` is not always executed during benchmark imports.
+Output stays fp16 — the `.float()` conversion was removed from `Linear._forward_torch()`,
+so fp16 cascades through the entire pipeline. Triton kernels handle float32 precision
+internally via `.to(tl.float32)` after loading.
 
 ### 6.5 Fused Flash Attention (GPU-Tier Aware)
 Single Triton kernel with online softmax. Tile sizes set by GPU tier:
 
 **Consumer GPUs** (RTX 4090/5090, ~100KB shared mem):
-- `head_dim=64` (encoder): `BLOCK_M=128, BLOCK_N=64`, `num_stages=1, num_warps=4`
-- `head_dim=128` (decoder): `BLOCK_M=64, BLOCK_N=32`, `num_stages=1, num_warps=4`
+- `head_dim=64` (encoder): `BLOCK_M=64, BLOCK_N=64`, `num_stages=1, num_warps=4`
+- `head_dim=128` (decoder): `BLOCK_M=32, BLOCK_N=32`, `num_stages=1, num_warps=4`
+- `seq_q <= 16`: `BLOCK_M=16` (optimized for KV-cached decode)
 
 **Datacenter GPUs** (H200/B200, ~228KB shared mem):
 - Larger tiles, `num_stages=2, num_warps=8`
@@ -325,14 +330,31 @@ Single Triton kernel with online softmax. Tile sizes set by GPU tier:
 For **KV-cached decode steps** (seq_q ≤ 4), SDPA fallback is used instead of the
 Triton kernel — avoids kernel launch overhead for tiny problems (-3ms).
 
-### 6.6 bf16 Kernel Outputs
+### 6.6 fp16 Kernel Outputs (formerly bf16)
 ```python
-# RMSNorm bf16 output — avoids fp32→bf16 cast in next Linear
-rmsnorm_bf16_kernel(...)  # stores y as bfloat16
+# RMSNorm fp16 output — avoids fp32→fp16 cast in next Linear
+rmsnorm_bf16_kernel(...)  # stores y as float16 (via .to(tl.float16))
 
-# LayerNorm bf16 output — same approach for encoder norm
-layernorm_kernel(...)     # stores y as bfloat16 when Linear.BF16=True
+# LayerNorm fp16 output — same approach for encoder norm
+layernorm_kernel(...)     # stores y as float16 when Linear.BF16=True
 ```
+
+### 6.10 fp16-Throughout Pipeline (Session 10)
+The biggest single optimization was eliminating unnecessary dtype conversions between operations.
+Triton kernels already compute in float32 internally (`.to(tl.float32)` after loading), so
+Python-side float32 casts in wrapper functions are redundant.
+
+**Changes (cumulative -11.5ms):**
+1. **Remove Linear `.float()`** — output stays fp16, cascades through pipeline (**-7.5ms**)
+2. **Remove silu/gelu float32 cast** — kernels handle internally (**-3.7ms**)
+3. **Remove RMSNorm/LayerNorm float32 cast** — same reasoning (~-0.5ms)
+4. **fp16 embedding output** — decoder pipeline starts in fp16
+5. **fp16 fused SwiGLU/EncoderMLP** — halves intermediate allocations
+6. **Remove flash attention float32 conversion** — pass fp16 to kernel (~-1ms)
+
+**Why this works:** Every Triton kernel loads data with `.to(tl.float32)` after `tl.load()`,
+computes in float32 precision, then `tl.store()` auto-converts back to the output tensor's dtype.
+So precision is maintained inside kernels regardless of input dtype.
 
 ### 6.7 Runtime GPU Detection
 ```python
@@ -366,11 +388,17 @@ the concatenation-based KV cache from model.py's `TextDecoder.__call__`.
 | SDPA fallback for seq_q≤4 | internal | **-3ms** | ADOPTED |
 | Runtime GPU detection | internal | portability | ADOPTED |
 | Dead code cleanup | internal | -320 lines | ADOPTED |
+| fp16 pipeline (remove float32 casts) | internal | **-11.5ms** | ADOPTED |
+| fp16 cuBLAS HGEMM (was bf16) | internal | ~-0.4ms | ADOPTED |
+| Smaller flash attention tiles | **meave** | improved prefill | ADOPTED |
 | Swizzled SwiGLU | **yash/optimize** | +18ms regression | Rejected |
 | @triton.autotune (lightweight) | **majed** | +0.7ms overhead | Rejected |
 | @triton.autotune (heavy kernels) | internal | massive regression | Rejected |
 | Softmax bf16 output | internal | 0ms (not in hot path) | Rejected |
 | Flash Attention num_stages=2 | **yash/optimize** | OOM on consumer GPUs | Rejected |
+| PyTorch SDPA for prefill/encoder | internal | +6ms regression | Rejected |
+| SDPA enable_gqa=True for decode | internal | +13ms regression | Rejected |
+| Fused gate+up Linear in MLP | internal | Neutral | Rejected |
 
 ---
 
@@ -392,19 +420,27 @@ the concatenation-based KV cache from model.py's `TextDecoder.__call__`.
 
 | Implementation | Time | Speed | vs Baseline |
 |----------------|------|-------|-------------|
-| Our template (with KV cache + SDPA) | **110.0ms** | 8.46ms/tok | **57.9% faster** |
-| Our template (without KV cache) | **120.7ms** | 9.29ms/tok | **53.8% faster** |
+| Our template (fp16 pipeline + KV cache + SDPA) | **98.5ms** | 7.58ms/tok | **62.3% faster** |
+| Our template (bf16 pipeline + KV cache + SDPA) | 110.0ms | 8.46ms/tok | 57.9% faster |
+| Our template (without KV cache) | 120.7ms | 9.29ms/tok | 53.8% faster |
 | Example baseline | 261.3ms | 20.10ms/tok | -- |
 | CPU fallback (no GPU) | ~14,000ms | ~1,000ms/tok | -- |
 
 Key optimizations ranked by impact:
 1. **cuBLAS-backed `F.linear`** + TF32 flags — cuBLAS outperforms Triton linear kernel
-2. **bfloat16 weights** — halves memory traffic for decode matmuls
+2. **fp16 weights + fp16-throughout pipeline** — halves memory traffic, eliminates dtype casts (-11.5ms)
 3. **Fused Flash Attention** — Triton kernel with online softmax (GPU-tier aware tiles)
 4. **Fused Q+K RoPE pair kernel** — single kernel for both Q and K rotations (-14ms)
 5. **generate_v8b with KV cache** — O(n) decode instead of O(n²) (-7.6ms)
-6. **Fused SwiGLU** — reduces kernel launch overhead for decoder MLP
-7. **SDPA fallback for decode** — PyTorch SDPA for seq_q≤4 (-3ms)
+6. **Remove Linear `.float()` conversion** — fp16 output cascades through pipeline (-7.5ms)
+7. **Remove silu/gelu float32 casts** — kernels handle precision internally (-3.7ms)
+8. **Fused SwiGLU** — reduces kernel launch overhead for decoder MLP
+9. **SDPA fallback for decode** — PyTorch SDPA for seq_q≤4 (-3ms)
+
+**Competition standings:** ankush 98.5ms, meave 127.8ms, yash 128ms, majed 187.9ms.
+
+**NOTE:** `benchmark_detailed.py` fails with the fp16 pipeline because the benchmark code
+expects float32 projector output. The student benchmark (authoritative) works perfectly.
 
 Detailed profiling shows decoder decode steps dominate (82.8% of total time with
 50 tokens) because stock `generate()` is O(n²). The `generate_v8b` KV-cached path

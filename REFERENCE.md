@@ -114,7 +114,7 @@ Conv2 output:        (1, 1280, T/2)        # Stride 2 + GELU
 Permute:             (1, T/2, 1280)        # (batch, seq, hidden)
 
 Encoder (32 layers):
-  Q/K/V proj:        (1, T/2, 1280)        # Linear (cuBLAS bf16)
+  Q/K/V proj:        (1, T/2, 1280)        # Linear (cuBLAS fp16 HGEMM)
   Reshape:           (1, 20, T/2, 64)      # 20 heads, head_dim=64
   RoPE:              Partial (first 32 dims rotated)
   Attention:         (1, 20, T/2, 64)      # Flash Attention kernel
@@ -154,16 +154,19 @@ layers.EncoderMLP.FUSED = True     # Set but NOT USED (model.py uses plain fc1/f
 # LinearGELU.FUSED = False         # Set but NOT USED (model.py uses plain linear_1/act)
 ```
 
-### bfloat16 Weights
+### fp16 Weights (flag name retained as BF16 for compatibility)
 ```python
-Linear.BF16 = True     # Class default in layers.py, halves memory traffic
+Linear.BF16 = True                     # Class default in layers.py, enables half-precision
+Linear._HALF_DTYPE = torch.float16     # Actual dtype: fp16 (faster HGEMM on RTX 5090)
 ```
+Output stays fp16 (no `.float()` conversion), keeping the entire pipeline in fp16.
 
 ### Flash Attention Configuration (GPU-Tier Aware)
 ```python
 # Consumer GPUs (RTX 4090/5090, ~100KB shared mem):
-if head_dim <= 64:   BLOCK_M, BLOCK_N = 128, 64  # Encoder
-else:                BLOCK_M, BLOCK_N = 64, 32    # Decoder
+if head_dim <= 64:   BLOCK_M, BLOCK_N = 64, 64   # Encoder (smaller tiles from meave)
+else:                BLOCK_M, BLOCK_N = 32, 32    # Decoder (smaller tiles from meave)
+if seq_q <= 16:      BLOCK_M = 16                 # Tiny queries (KV-cached decode)
 # num_stages=1, num_warps=4
 
 # Datacenter GPUs (H200/B200, ~228KB shared mem):
@@ -198,10 +201,11 @@ python benchmark_detailed.py glm_asr_triton_template
 ### Student Benchmark
 | Implementation | Time | Speed | Accuracy |
 |----------------|------|-------|----------|
-| **Our template (KV cache + SDPA)** | **110.0ms** | 8.46ms/tok | 100% |
+| **Our template (fp16 pipeline + KV cache + SDPA)** | **98.5ms** | 7.58ms/tok | 100% |
+| Our template (bf16 pipeline + KV cache + SDPA) | 110.0ms | 8.46ms/tok | 100% |
 | Our template (no KV cache) | 120.7ms | 9.29ms/tok | 100% |
 | Example baseline | 261.3ms | 20.10ms/tok | 100% |
-| **Speedup** | **57.9%** | | |
+| **Speedup** | **62.3%** | | |
 
 ### Detailed Benchmark (50 generated tokens)
 | Component | Time | % Total |
@@ -227,11 +231,17 @@ python benchmark_detailed.py glm_asr_triton_template
 | SDPA fallback for seq_q≤4 | internal | **-3ms** | **ADOPTED** |
 | Runtime GPU detection | internal | portability | **ADOPTED** |
 | Dead code cleanup | internal | -320 lines | **ADOPTED** |
+| fp16 pipeline (remove float32 casts) | internal | **-11.5ms** | **ADOPTED** |
+| fp16 cuBLAS HGEMM (was bf16) | internal | ~-0.4ms | **ADOPTED** |
+| Smaller flash attention tiles | meave | improved prefill | **ADOPTED** |
 | Swizzled SwiGLU | yash/optimize | +18ms regression | Rejected |
 | @triton.autotune (lightweight) | majed | +0.7ms overhead | Rejected |
 | @triton.autotune (heavy kernels) | internal | massive regression | Rejected |
 | Softmax bf16 output | internal | 0ms | Rejected |
 | Flash Attention num_stages=2 | yash/optimize | OOM on consumer GPUs | Rejected |
+| PyTorch SDPA for prefill/encoder | internal | +6ms regression | Rejected |
+| SDPA enable_gqa=True for decode | internal | +13ms regression | Rejected |
+| Fused gate+up Linear in MLP | internal | Neutral | Rejected |
 
 ---
 
@@ -257,6 +267,18 @@ python benchmark_detailed.py glm_asr_triton_template
 - [x] SwiGLU swizzle tested, rejected (+18ms regression on RTX 5090)
 - [x] @triton.autotune tested, rejected (lightweight: +0.7ms overhead; heavy kernels: massive regression)
 - [x] Softmax bf16, num_stages=2, num_warps=8 — tested, no improvement on consumer GPUs
+- [x] fp16 cuBLAS HGEMM (`Linear._HALF_DTYPE = torch.float16`) — slightly faster than bf16
+- [x] Smaller flash attention tiles (from meave) — 64x64 encoder, 32x32 decoder
+- [x] Remove Linear `.float()` conversion — fp16 output cascades through pipeline (**-7.5ms**)
+- [x] Remove silu/gelu Python-side float32 cast — kernels handle internally (**-3.7ms**)
+- [x] Remove RMSNorm/LayerNorm Python-side float32 cast — kernels handle internally (~-0.5ms)
+- [x] fp16 embedding output — keeps decoder pipeline in fp16 from start
+- [x] fp16 fused SwiGLU/EncoderMLP — halves intermediate memory bandwidth
+- [x] Remove flash attention Python-side float32 conversion (~-1ms)
+- [x] Norm kernel output dtype: fp16 (was bf16)
+- [x] PyTorch SDPA for prefill/encoder — tested, +6ms regression. Rejected
+- [x] SDPA enable_gqa=True — tested, +13ms regression. Rejected
+- [x] Fused gate+up Linear in MLP — tested, neutral. Rejected
 
 ---
 

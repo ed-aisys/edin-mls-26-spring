@@ -113,7 +113,7 @@ def rmsnorm_bf16_kernel(
     var = tl.sum(x * x, axis=0) / hidden_size
     x_norm = x * tl.rsqrt(var + eps)
     w = tl.load(w_ptr + offs, mask=mask, other=0.0)
-    y = (x_norm * w).to(tl.bfloat16)
+    y = (x_norm * w).to(tl.float16)
     tl.store(y_ptr + pid * stride_y + offs, y, mask=mask)
 
 
@@ -148,7 +148,7 @@ def layernorm_kernel(
     x_norm = x_centered * tl.rsqrt(var + eps)
     w = tl.load(w_ptr + offs, mask=mask, other=0.0)
     b = tl.load(b_ptr + offs, mask=mask, other=0.0)
-    y = (x_norm * w + b).to(tl.bfloat16)
+    y = (x_norm * w + b).to(tl.float16)
     tl.store(y_ptr + pid * stride_y + offs, y, mask=mask)
 
 
@@ -424,16 +424,14 @@ class RMSNorm:
         if self.use_triton and x.is_cuda:
             original_shape = x.shape
             batch_size = x.numel() // self.hidden_size
-            x_flat = x.reshape(batch_size, self.hidden_size)
-            if x_flat.dtype != torch.float32:
-                x_flat = x_flat.to(torch.float32)
+            x_flat = x.reshape(batch_size, self.hidden_size).contiguous()
             if self.weight.device != x.device:
                 self.weight = self.weight.to(x.device)
-            # Use bf16 output kernel when Linear.BF16 is True (from meave branch)
+            # Use fp16 output kernel when Linear.BF16 is True
             if Linear.BF16:
                 output = torch.empty(
                     (batch_size, self.hidden_size),
-                    dtype=torch.bfloat16,
+                    dtype=torch.float16,
                     device=x.device,
                 )
                 rmsnorm_bf16_kernel[(batch_size,)](
@@ -483,18 +481,16 @@ class LayerNorm:
         if self.use_triton and x.is_cuda:
             original_shape = x.shape
             batch_size = x.numel() // self.hidden_size
-            x_flat = x.reshape(batch_size, self.hidden_size)
-            if x_flat.dtype != torch.float32:
-                x_flat = x_flat.to(torch.float32)
+            x_flat = x.reshape(batch_size, self.hidden_size).contiguous()
             if self.weight.device != x.device:
                 self.weight = self.weight.to(x.device)
             if self.bias.device != x.device:
                 self.bias = self.bias.to(x.device)
-            # Use bf16 output to avoid fp32→bf16 conversion in next Linear layer
+            # Use fp16 output to avoid conversion in next Linear layer
             if Linear.BF16:
                 output = torch.empty(
                     (batch_size, self.hidden_size),
-                    dtype=torch.bfloat16,
+                    dtype=torch.float16,
                     device=x.device,
                 )
             else:
@@ -529,9 +525,7 @@ def gelu(x: torch.Tensor) -> torch.Tensor:
         return torch.nn.functional.gelu(x)
     original_shape = x.shape
     n = x.numel()
-    x_flat = x.reshape(-1)
-    if x_flat.dtype != torch.float32:
-        x_flat = x_flat.to(torch.float32)
+    x_flat = x.reshape(-1).contiguous()
     output = torch.empty_like(x_flat)
     gelu_kernel[(triton.cdiv(n, 1024),)](x_flat, output, n, BLOCK_SIZE=1024)
     return output.reshape(original_shape)
@@ -543,9 +537,7 @@ def silu(x: torch.Tensor) -> torch.Tensor:
         return torch.nn.functional.silu(x)
     original_shape = x.shape
     n = x.numel()
-    x_flat = x.reshape(-1)
-    if x_flat.dtype != torch.float32:
-        x_flat = x_flat.to(torch.float32)
+    x_flat = x.reshape(-1).contiguous()
     output = torch.empty_like(x_flat)
     silu_kernel[(triton.cdiv(n, 1024),)](x_flat, output, n, BLOCK_SIZE=1024)
     return output.reshape(original_shape)
@@ -615,7 +607,9 @@ class Linear:
             return self._forward_triton(x)
         return self._forward_torch(x)
 
-    BF16 = True  # Use bfloat16 weights (halves memory traffic for decode)
+    BF16 = True  # Use reduced-precision weights (halves memory traffic for decode)
+    # Use fp16 for cuBLAS matmuls (slightly faster than bf16 on some GPUs)
+    _HALF_DTYPE = torch.float16
 
     def _forward_torch(self, x: torch.Tensor) -> torch.Tensor:
         """Torch matmul backend."""
@@ -637,12 +631,13 @@ class Linear:
             bias = self.bias_param
 
         if Linear.BF16:
+            hdtype = Linear._HALF_DTYPE
             if self._weight_bf16 is None:
-                self._weight_bf16 = self.weight.bfloat16()
-                self._bias_bf16 = bias.bfloat16() if bias is not None else None
+                self._weight_bf16 = self.weight.to(hdtype)
+                self._bias_bf16 = bias.to(hdtype) if bias is not None else None
             output = F.linear(
-                x_2d.bfloat16(), self._weight_bf16, self._bias_bf16
-            ).float()
+                x_2d.to(hdtype), self._weight_bf16, self._bias_bf16
+            )
         else:
             output = F.linear(x_2d.to(torch.float32), self.weight, bias)
 
@@ -733,8 +728,9 @@ class Embedding:
             return output.reshape(*original_shape, self.embedding_dim)
 
         indices_flat = input_ids.reshape(-1).to(torch.int32).contiguous()
+        out_dtype = torch.float16 if Linear.BF16 else torch.float32
         output = torch.empty(
-            (batch_size, self.embedding_dim), dtype=torch.float32, device=indices_flat.device
+            (batch_size, self.embedding_dim), dtype=out_dtype, device=indices_flat.device
         )
 
         block = 256
@@ -918,8 +914,9 @@ class MLP:
         if self._gate_weight_t is None and self.use_gating:
             if self.gate_proj.weight.device != self.up_proj.weight.device:
                 self.up_proj.weight = self.up_proj.weight.to(self.gate_proj.weight.device)
-            self._gate_weight_t = self.gate_proj.weight.t().contiguous()
-            self._up_weight_t = self.up_proj.weight.t().contiguous()
+            hdtype = Linear._HALF_DTYPE if Linear.BF16 else torch.float32
+            self._gate_weight_t = self.gate_proj.weight.to(hdtype).t().contiguous()
+            self._up_weight_t = self.up_proj.weight.to(hdtype).t().contiguous()
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         num_rows = int(np.prod(x.shape[:-1]))
@@ -944,7 +941,8 @@ class MLP:
         self._prepare_fused_weights()
 
         orig_shape = x.shape
-        x_2d = x.reshape(-1, self.hidden_size).to(torch.float32).contiguous()
+        hdtype = Linear._HALF_DTYPE if Linear.BF16 else torch.float32
+        x_2d = x.reshape(-1, self.hidden_size).to(hdtype).contiguous()
         M = x_2d.shape[0]
         K = self.hidden_size
         N = self.intermediate_size
@@ -955,7 +953,7 @@ class MLP:
 
         if M != M_pad or K != K_pad:
             x_padded = torch.zeros(
-                (M_pad, K_pad), dtype=torch.float32, device=x.device
+                (M_pad, K_pad), dtype=hdtype, device=x.device
             )
             x_padded[:M, :K] = x_2d
         else:
@@ -963,11 +961,11 @@ class MLP:
 
         if K != K_pad or N != N_pad:
             gate_w_padded = torch.zeros(
-                (K_pad, N_pad), dtype=torch.float32, device=x.device
+                (K_pad, N_pad), dtype=hdtype, device=x.device
             )
             gate_w_padded[:K, :N] = self._gate_weight_t
             up_w_padded = torch.zeros(
-                (K_pad, N_pad), dtype=torch.float32, device=x.device
+                (K_pad, N_pad), dtype=hdtype, device=x.device
             )
             up_w_padded[:K, :N] = self._up_weight_t
         else:
@@ -975,7 +973,7 @@ class MLP:
             up_w_padded = self._up_weight_t
 
         intermediate = torch.zeros(
-            (M_pad, N_pad), dtype=torch.float32, device=x.device
+            (M_pad, N_pad), dtype=hdtype, device=x.device
         )
 
         grid = (
@@ -1039,7 +1037,8 @@ class EncoderMLP:
     def _prepare_fused_weights(self):
         """Prepare pre-transposed weights for fused kernel."""
         if self._fc1_weight_t is None:
-            self._fc1_weight_t = self.fc1.weight.t().contiguous()
+            hdtype = Linear._HALF_DTYPE if Linear.BF16 else torch.float32
+            self._fc1_weight_t = self.fc1.weight.to(hdtype).t().contiguous()
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         num_rows = int(np.prod(x.shape[:-1]))
@@ -1064,7 +1063,8 @@ class EncoderMLP:
         self._prepare_fused_weights()
 
         orig_shape = x.shape
-        x_2d = x.reshape(-1, self.hidden_size).to(torch.float32).contiguous()
+        hdtype = Linear._HALF_DTYPE if Linear.BF16 else torch.float32
+        x_2d = x.reshape(-1, self.hidden_size).to(hdtype).contiguous()
         M = x_2d.shape[0]
         K = self.hidden_size
         N = self.intermediate_size
@@ -1075,7 +1075,7 @@ class EncoderMLP:
 
         if M != M_pad or K != K_pad:
             x_padded = torch.zeros(
-                (M_pad, K_pad), dtype=torch.float32, device=x.device
+                (M_pad, K_pad), dtype=hdtype, device=x.device
             )
             x_padded[:M, :K] = x_2d
         else:
@@ -1083,7 +1083,7 @@ class EncoderMLP:
 
         if K != K_pad or N != N_pad:
             fc1_w_padded = torch.zeros(
-                (K_pad, N_pad), dtype=torch.float32, device=x.device
+                (K_pad, N_pad), dtype=hdtype, device=x.device
             )
             fc1_w_padded[:K, :N] = self._fc1_weight_t
         else:
@@ -1094,16 +1094,16 @@ class EncoderMLP:
                 self.fc1.bias_param = self.fc1.bias_param.to(x.device)
             if N != N_pad:
                 fc1_bias_padded = torch.zeros(
-                    (N_pad,), dtype=torch.float32, device=x.device
+                    (N_pad,), dtype=hdtype, device=x.device
                 )
                 fc1_bias_padded[:N] = self.fc1.bias_param
             else:
-                fc1_bias_padded = self.fc1.bias_param
+                fc1_bias_padded = self.fc1.bias_param.to(hdtype)
         else:
-            fc1_bias_padded = torch.zeros((N_pad,), dtype=torch.float32, device=x.device)
+            fc1_bias_padded = torch.zeros((N_pad,), dtype=hdtype, device=x.device)
 
         intermediate = torch.zeros(
-            (M_pad, N_pad), dtype=torch.float32, device=x.device
+            (M_pad, N_pad), dtype=hdtype, device=x.device
         )
 
         grid = (
@@ -1198,8 +1198,7 @@ def _generate_v8b(
         next_token_logits = logits[:, -1, :] / temperature
 
         if top_k > 0 and top_k < next_token_logits.shape[-1]:
-            top_k_indices = torch.argsort(next_token_logits, dim=-1)[:, -top_k:]
-            top_k_logits = torch.gather(next_token_logits, dim=-1, index=top_k_indices)
+            top_k_logits, top_k_indices = torch.topk(next_token_logits, k=top_k, dim=-1)
             top_k_logits_shifted = top_k_logits - torch.max(
                 top_k_logits, dim=-1, keepdim=True
             ).values

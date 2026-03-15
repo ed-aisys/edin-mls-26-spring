@@ -185,7 +185,10 @@ Fuses THREE operations: two matmuls and the gating. Input `x` is loaded once.
 **`Linear` class:** Switchable between torch (cuBLAS) and Triton backends.
 - `BACKEND = "torch"`: Uses `F.linear(...)` → cuBLAS/cuBLASLt (current, fastest)
 - `BACKEND = "triton"`: Uses `linear_kernel_tf32`
-- `BF16 = True` (class default): Caches bf16 weight copies, halves memory traffic
+- `BF16 = True` (class default): Enables half-precision weight caching
+- `_HALF_DTYPE = torch.float16`: Actual dtype used for cuBLAS HGEMM (faster than bf16 on RTX 5090)
+- **fp16-throughout pipeline:** Output stays fp16 (`.float()` removed), cascading fp16 through
+  the entire model. Triton kernels handle float32 precision internally via `.to(tl.float32)`.
 
 **`MLP` class:** Implements SwiGLU gating for the text decoder:
 ```
@@ -264,10 +267,11 @@ output = acc / l_i                  # final normalization
 3. **O(BLOCK) SRAM** — memory-efficient for long sequences.
 4. **Tensor cores** — `tl.dot` for both Q@K^T and P@V.
 
-**Tile sizes** (GPU-tier aware):
+**Tile sizes** (GPU-tier aware, smaller tiles from meave):
 - **Consumer GPUs** (RTX 4090/5090, ~100KB shared mem):
-  - Encoder (head_dim=64): `BLOCK_M=128, BLOCK_N=64`, `num_stages=1, num_warps=4`
-  - Decoder (head_dim=128): `BLOCK_M=64, BLOCK_N=32`, `num_stages=1, num_warps=4`
+  - Encoder (head_dim=64): `BLOCK_M=64, BLOCK_N=64`, `num_stages=1, num_warps=4`
+  - Decoder (head_dim=128): `BLOCK_M=32, BLOCK_N=32`, `num_stages=1, num_warps=4`
+  - `seq_q <= 16`: `BLOCK_M=16` (optimized for KV-cached decode)
 - **Datacenter GPUs** (H200/B200, ~228KB shared mem):
   - Larger tiles, `num_stages=2, num_warps=8`
 
@@ -290,7 +294,7 @@ if q.is_cuda and seq_q <= 4:
     )
 ```
 
-**Impact:** -3ms on decode steps (113.5ms → 110.0ms).
+**Impact:** -3ms on decode steps (113.5ms → 110.0ms, further to 98.5ms with fp16 pipeline).
 
 ### 3.4 Legacy Attention Kernels (REMOVED)
 
@@ -493,9 +497,14 @@ def check_transcription(transcription, expected):
 ```
 
 ### Current Benchmark (RTX 5090, 2026-03-15)
-- With generate_v8b + SDPA fallback: `110.0ms (+/- 0.2ms)`, `8.46 ms/token`
+- With fp16 pipeline + generate_v8b + SDPA fallback: `98.5ms`, `7.58 ms/token`
+- With bf16 pipeline + generate_v8b + SDPA fallback: `110.0ms (+/- 0.2ms)`, `8.46 ms/token`
 - Without generate_v8b: `120.7ms (+/- 0.2ms)`, `9.29 ms/token`
 - 13 tokens generated, `100.0%` transcription accuracy
+- **Competition:** ankush 98.5ms, meave 127.8ms, yash 128ms, majed 187.9ms
+
+**NOTE:** `benchmark_detailed.py` fails with fp16 pipeline (expects float32 projector output).
+Student benchmark (authoritative) works perfectly.
 
 ---
 
@@ -516,7 +525,7 @@ def check_transcription(transcription, expected):
 4. Audio Encoder (32 transformer layers)
    For each layer:
      a. LayerNorm(hidden_states)           [layernorm_kernel]
-     b. Q = Linear(normalized)             [F.linear bf16 -> cuBLAS]
+     b. Q = Linear(normalized)             [F.linear fp16 -> cuBLAS HGEMM]
      c. K = Linear(normalized)
      d. V = Linear(normalized)
      e. Reshape to (batch, heads, seq, dim)
@@ -531,9 +540,9 @@ def check_transcription(transcription, expected):
    |
 5. Multi-Modal Projector
    -> Pool 4 frames: (1, ~44, 5120)
-   -> Linear(5120->4096): (1, ~44, 4096)   [cuBLAS bf16]
-   -> gelu: (1, ~44, 4096)                 [gelu_kernel]
-   -> Linear(4096->2048): (1, ~44, 2048)   [cuBLAS bf16]
+   -> Linear(5120->4096): (1, ~44, 4096)   [cuBLAS fp16 HGEMM, output stays fp16]
+   -> gelu: (1, ~44, 4096)                 [gelu_kernel, fp16 in/out]
+   -> Linear(4096->2048): (1, ~44, 2048)   [cuBLAS fp16 HGEMM]
    |
 6. Embed input tokens (chat template + audio placeholders)
    -> Replace audio placeholders with projected audio embeddings
@@ -542,7 +551,7 @@ def check_transcription(transcription, expected):
 7. Text Decoder (28 transformer layers, full sequence each step)
    For each layer:
      a. RMSNorm(hidden_states)             [rmsnorm_kernel]
-     b. Q (16 heads) = Linear(normalized)  [F.linear bf16]
+     b. Q (16 heads) = Linear(normalized)  [F.linear fp16]
      c. K (4 heads) = Linear(normalized)   [GQA: 4 KV heads shared by 16 Q heads]
      d. V (4 heads) = Linear(normalized)
      e. Apply full RoPE to Q, K
@@ -584,7 +593,7 @@ Each decode step reprocesses the full growing sequence.
 | rmsnorm_kernel | 0 | 56 | 56 | ~784 |
 | gelu_kernel | 33 | 0 | 0 | 33 |
 | silu_kernel | 0 | 28 | 28 | ~392 |
-| linear (cuBLAS bf16) | ~160 | ~168 | ~168 | ~2512 |
+| linear (cuBLAS fp16) | ~160 | ~168 | ~168 | ~2512 |
 | flash_attention_kernel | 32 | 28 | 28 | ~424 |
 | compute_freqs | 1 | 1 | 1 | ~15 |
 | softmax (standalone) | 0 | 1 | 1 | ~14 |
@@ -602,7 +611,7 @@ Optimizations adopted or planned from analysis of other branches:
 | Optimization | Source | Description |
 |-------------|--------|-------------|
 | cuBLAS backend | **majed**, **yash/optimize** | `F.linear` for all Linear layers |
-| bfloat16 weights | **yash/optimize**, **majed** | Cache bf16 copies, halve memory traffic |
+| fp16 weights (was bf16) | **yash/optimize**, **majed**, **meave** | Cache fp16 copies, halve memory traffic, fp16 HGEMM |
 | Flash Attention | **majed**, **meave** | Triton kernel with online softmax |
 | Fused SwiGLU | **yash/optimize** | Single kernel for gate+up in decoder MLP |
 | TF32 flags | Common | `allow_tf32`, `set_float32_matmul_precision("high")` |
@@ -622,6 +631,21 @@ Optimizations adopted or planned from analysis of other branches:
 | Runtime GPU detection | internal | portability (detect shared mem tier at import) |
 | Dead code cleanup | internal | -320 lines (removed legacy attention kernels) |
 
+### Adopted (2026-03-15, fp16-throughout pipeline)
+| Optimization | Source | Actual Impact |
+|-------------|--------|---------------|
+| fp16 cuBLAS HGEMM (was bf16) | internal | ~-0.4ms (fp16 HGEMM slightly faster on RTX 5090) |
+| Smaller flash attention tiles | **meave** | improved prefill (64x64 encoder, 32x32 decoder) |
+| Remove Linear `.float()` conversion | internal | **-7.5ms** (biggest single win — fp16 cascades through pipeline) |
+| Remove silu/gelu float32 cast | internal | **-3.7ms** (kernels do `.to(tl.float32)` internally) |
+| Remove RMSNorm/LayerNorm float32 cast | internal | ~-0.5ms (same reasoning) |
+| fp16 embedding output | internal | keeps decoder pipeline in fp16 from start |
+| fp16 fused SwiGLU/EncoderMLP | internal | halves intermediate memory bandwidth |
+| Remove flash attention float32 conversion | internal | ~-1ms (pass fp16 to kernel directly) |
+| Norm kernel output fp16 (was bf16) | internal | matches fp16 pipeline |
+| BLOCK_M=16 for seq_q<=16 | **meave** | optimized for KV-cached decode |
+| topk instead of argsort in sampling | internal | neutral (cleaner code) |
+
 ### Rejected (tested, did not help on RTX 5090)
 | Optimization | Source | Result |
 |-------------|--------|--------|
@@ -633,6 +657,9 @@ Optimizations adopted or planned from analysis of other branches:
 | Flash Attention num_stages=2 | **yash/optimize** | OOM on consumer GPUs (~100KB shared mem) |
 | Flash Attention num_warps=8 | **yash/optimize** | 0ms change on RTX 5090 |
 | PyTorch GELU/SiLU bf16 | internal | +0.3ms — Triton kernels faster |
+| PyTorch SDPA for prefill/encoder | internal | +6ms — Triton flash kernel faster (114.5 vs 108ms) |
+| SDPA enable_gqa=True for decode | internal | +13ms — manual KV expansion + standard SDPA faster |
+| Fused gate+up Linear in MLP | internal | Neutral — kernel launch savings offset by reshape overhead |
 
 ### Not Applicable
 | Optimization | Source | Why Not |

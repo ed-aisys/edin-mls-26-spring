@@ -118,7 +118,7 @@ def flash_attention_kernel(
             k_base + cur_offs_n[:, None] * stride_kk + offs_d[None, :] * stride_kd,
             mask=k_mask,
             other=0.0,
-        )
+        ).to(tl.float32)
 
         # S = Q @ K^T: [BLOCK_M, BLOCK_N]
         s = tl.dot(q, tl.trans(k))
@@ -155,10 +155,10 @@ def flash_attention_kernel(
             v_base + cur_offs_n[:, None] * stride_vk + offs_d[None, :] * stride_vd,
             mask=v_mask,
             other=0.0,
-        )
+        ).to(tl.float32)
 
         # Accumulate: acc += P @ V
-        acc += tl.dot(p.to(v.dtype), v)
+        acc += tl.dot(p, v)
 
         m_i = m_new
 
@@ -291,9 +291,9 @@ def scaled_dot_product_attention(
         # Fused Flash Attention kernel — single kernel launch with online softmax.
         # No materialization of the full scores matrix in DRAM.
         BH = batch * num_heads
-        q_flat = q.reshape(BH, seq_q, head_dim).contiguous().to(torch.float32)
-        k_flat = k.reshape(BH, seq_k, head_dim).contiguous().to(torch.float32)
-        v_flat = v.reshape(BH, seq_k, head_dim).contiguous().to(torch.float32)
+        q_flat = q.reshape(BH, seq_q, head_dim).contiguous()
+        k_flat = k.reshape(BH, seq_k, head_dim).contiguous()
+        v_flat = v.reshape(BH, seq_k, head_dim).contiguous()
 
         # Prepare attention mask for kernel (flatten batch*heads dimension)
         has_mask = attention_mask is not None
@@ -319,11 +319,15 @@ def scaled_dot_product_attention(
             else:
                 BLOCK_M, BLOCK_N, nstages, nwarps = 128, 64, 2, 8
         else:
-            # RTX 4090/5090: ~100KB shared mem → conservative tiles
+            # RTX 4090/5090: ~100KB shared mem
+            # Smaller tiles (from meave) give faster prefill compilation
             if head_dim <= 64:
-                BLOCK_M, BLOCK_N, nstages, nwarps = 128, 64, 1, 4
+                BLOCK_M, BLOCK_N, nstages, nwarps = 64, 64, 1, 4
             else:
-                BLOCK_M, BLOCK_N, nstages, nwarps = 64, 32, 1, 4
+                BLOCK_M, BLOCK_N, nstages, nwarps = 32, 32, 1, 4
+
+        if seq_q <= 16:
+            BLOCK_M = 16
 
         grid = (triton.cdiv(seq_q, BLOCK_M), BH)
         flash_attention_kernel[grid](
