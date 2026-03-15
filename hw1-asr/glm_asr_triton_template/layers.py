@@ -1290,7 +1290,7 @@ def _generate_v8b(
     top_k=50,
     audio_pad_token_id=59260,
 ):
-    """KV-cached O(n) generation. Uses pre-allocated KV buffers from model.py."""
+    """KV-cached O(n) generation using model.decode() with use_cache=True."""
     # Encode audio
     audio_embeds = self.encode_audio(input_features, input_features_mask)
 
@@ -1328,18 +1328,10 @@ def _generate_v8b(
         eos_token_ids = [eos_token_ids]
     eos_tensor = torch.tensor(eos_token_ids, dtype=torch.int64, device=generated.device)
 
-    # Allocate KV buffers
-    prefill_len = inputs_embeds.shape[1]
-    max_seq_len = prefill_len + max_new_tokens
-    kv_buffers = self.text_decoder.allocate_kv_buffers(batch_size, max_seq_len)
+    # Prefill: process all input tokens, cache K/V via decode()
+    logits, past_kv = self.decode(inputs_embeds=inputs_embeds, use_cache=True)
 
-    # Prefill: process all input tokens at once
-    hidden_states, cache_pos = self.text_decoder.forward_with_kv_buffers(
-        inputs_embeds, kv_buffers, 0
-    )
-    logits = self.lm_head(hidden_states[:, -1:, :])
-
-    # Decode loop: one token at a time with KV cache
+    # Decode loop: one token at a time, passing cached K/V
     for _ in range(max_new_tokens):
         next_token_logits = logits[:, -1, :] / temperature
 
@@ -1370,12 +1362,11 @@ def _generate_v8b(
         if torch.all(finished):
             break
 
-        # Only process ONE new token through the decoder
+        # Only process ONE new token, decode() handles KV cache via past_key_values
         new_embeds = self.text_decoder.embed_tokens(next_token)
-        hidden_states, cache_pos = self.text_decoder.forward_with_kv_buffers(
-            new_embeds, kv_buffers, cache_pos
+        logits, past_kv = self.decode(
+            inputs_embeds=new_embeds, past_key_values=past_kv, use_cache=True
         )
-        logits = self.lm_head(hidden_states)
 
     return generated
 
