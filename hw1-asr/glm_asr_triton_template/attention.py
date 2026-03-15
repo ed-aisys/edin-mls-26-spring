@@ -452,6 +452,13 @@ def scaled_dot_product_attention(
 
     head_dim_padded = next_power_of_two(head_dim)
 
+    if q.is_cuda and seq_q <= 4:
+        # For very short queries (KV-cached decode), use PyTorch SDPA
+        # which avoids Triton kernel launch overhead for tiny problems
+        return torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=attention_mask, is_causal=is_causal, scale=scale
+        )
+
     if q.is_cuda:
         # Fused Flash Attention kernel — single kernel launch with online softmax.
         # No materialization of the full scores matrix in DRAM.
