@@ -166,7 +166,8 @@ Output stays fp16 (no `.float()` conversion), keeping the entire pipeline in fp1
 # GPUProfile detects GPU architecture at import time
 GPU = GPUProfile()  # Replaces old _detect_gpu_tier()
 
-# Reads: sm_version, shared_memory_per_block_optin, gpu_name
+# Reads: sm_version, gpu_name, shared memory via getattr fallback chain:
+#   shared_memory_per_block_optin → max_shared_memory_per_block → shared_memory_per_block
 # Classifies: blackwell_consumer, ada, hopper, blackwell_dc, ampere_dc, ampere_consumer, older
 
 # _KNOWN_CONFIGS table stores tested tile sizes for 6 GPU architectures

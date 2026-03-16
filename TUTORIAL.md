@@ -395,9 +395,13 @@ All tile selection across the codebase uses `GPU.*`:
 - layers.py: `GPU.matmul_tile_m/n/k` for Linear, MLP, EncoderMLP
 - rope.py: `GPU.rope_nstages`, `GPU.rope_nwarps` for fused RoPE pair kernel
 
-**Important:** Uses `shared_memory_per_block_optin` (not `shared_memory_per_block`).
-The default property returns only 48KB, but Triton can use up to 99KB (RTX 5090)
-or 228KB (H200) via the optin mechanism.
+**Important:** Uses `shared_memory_per_block_optin` with a `getattr` fallback chain
+(`shared_memory_per_block_optin` → `max_shared_memory_per_block` → `shared_memory_per_block`)
+for compatibility with older PyTorch versions. The default `shared_memory_per_block` returns
+only 48KB, but the optin value is what Triton can actually use (99KB on RTX 5090, 228KB on H200).
+
+**numpy input handling:** `_generate_v8b` converts numpy array inputs to CUDA tensors
+via `torch.from_numpy()`, since some benchmark environments pass numpy instead of tensors.
 
 A warmup autotune (`warmup_attention_tiles()`) was tested but found worse configs
 in practice (101.6ms vs 98.5ms) and was removed. The 2-tier fallback

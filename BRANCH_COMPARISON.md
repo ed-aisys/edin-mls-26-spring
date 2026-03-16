@@ -667,7 +667,8 @@ class GPUProfile:
     def __init__(self):
         props = torch.cuda.get_device_properties(0)
         self.sm_version = torch.cuda.get_device_capability(0)
-        self.smem_per_block = props.shared_memory_per_block_optin  # 99KB-228KB
+        self.smem_per_block = getattr(props, 'shared_memory_per_block_optin',
+            getattr(props, 'max_shared_memory_per_block', props.shared_memory_per_block))
         # Classify: blackwell_consumer, ada, hopper, blackwell_dc, ampere_dc, ampere_consumer, older
         known = _KNOWN_CONFIGS.get(self.arch_name)
         if known:

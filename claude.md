@@ -367,8 +367,8 @@ Replaced the simple 2-tier `_detect_gpu_tier()` with a full `GPUProfile` class.
   - `ada` (RTX 4090, sm_89, 100KB)
   - `ampere_dc` (A100, sm_80, 164KB), `ampere_consumer` (RTX 3090, sm_80, 100KB)
   - `older`, `cpu` (fallbacks)
-- Uses `shared_memory_per_block_optin` (not `shared_memory_per_block`) — the optin value
-  is what Triton can actually use (99KB vs 48KB default on RTX 5090)
+- Uses `shared_memory_per_block_optin` with `getattr` fallback chain for older PyTorch
+  (`shared_memory_per_block_optin` → `max_shared_memory_per_block` → `shared_memory_per_block`)
 - `GPU = GPUProfile()` replaces `_GPU_TIER = _detect_gpu_tier()`
 
 #### 12.2 _KNOWN_CONFIGS Table
@@ -402,7 +402,14 @@ When `arch_name` is not in `_KNOWN_CONFIGS`, tiles are computed from shared memo
 - layers.py: `Linear`, `MLP`, `EncoderMLP` tile sizes read from `GPU.matmul_tile_m/n/k`
 - `_GPU_TIER` retained as backward-compatibility alias
 
-#### 12.6 Performance Impact
+#### 12.6 H200 Cluster Compatibility Fixes (Session 12c, 2026-03-16)
+- **numpy input_features**: `_generate_v8b` now converts numpy arrays to CUDA tensors via
+  `torch.from_numpy()`. Some benchmark environments pass numpy instead of tensors.
+- **Robust shared memory detection**: `GPUProfile.__init__` uses `getattr` fallback chain:
+  `shared_memory_per_block_optin` → `max_shared_memory_per_block` → `shared_memory_per_block`.
+  Prevents silent fallback to CPU profile on older PyTorch versions that lack the optin property.
+
+#### 12.7 Performance Impact
 - 98.5ms → 98.8ms (within noise, no regression)
 - Known configs match hand-tuned values exactly
 - Dynamic computation produces good-enough configs for untested GPUs

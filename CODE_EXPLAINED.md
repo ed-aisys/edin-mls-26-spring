@@ -90,6 +90,12 @@ GPU = GPUProfile()  # Module-level singleton, computed once at import
 228KB on H200. Using the wrong property led to the old code always detecting "consumer"
 even on datacenter GPUs (it hit the except fallback).
 
+**Robust fallback:** The property is read via a `getattr` chain:
+`shared_memory_per_block_optin` → `max_shared_memory_per_block` → `shared_memory_per_block`.
+This prevents silent fallback to CPU profile on older PyTorch versions that lack the optin
+property. Without this, H200s running older PyTorch would get consumer-sized tiles (64x64)
+instead of datacenter tiles (128x128).
+
 **Dynamic tile computation** for unknown GPUs:
 - `_compute_attention_tiles(head_dim, smem_bytes)`: Tries ranked balanced configs
   (e.g., 128x128, 128x64, 64x64) largest first. Formula:
