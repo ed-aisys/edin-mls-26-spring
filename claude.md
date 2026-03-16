@@ -404,7 +404,8 @@ When `arch_name` is not in `_KNOWN_CONFIGS`, tiles are computed from shared memo
 
 #### 12.6 H200 Cluster Compatibility Fixes (Session 12c, 2026-03-16)
 - **numpy input_features**: `_generate_v8b` now converts numpy arrays to CUDA tensors via
-  `torch.from_numpy()`. Some benchmark environments pass numpy instead of tensors.
+  `torch.as_tensor()`. Uses `as_tensor` instead of `from_numpy()` because the H200 cluster's
+  numpy version mismatch causes `from_numpy()` to fail with "expected np.ndarray (got ndarray)".
 - **Robust shared memory detection**: `GPUProfile.__init__` uses `getattr` fallback chain:
   `shared_memory_per_block_optin` → `max_shared_memory_per_block` → `shared_memory_per_block`.
   Prevents silent fallback to CPU profile on older PyTorch versions that lack the optin property.

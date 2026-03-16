@@ -401,7 +401,9 @@ for compatibility with older PyTorch versions. The default `shared_memory_per_bl
 only 48KB, but the optin value is what Triton can actually use (99KB on RTX 5090, 228KB on H200).
 
 **numpy input handling:** `_generate_v8b` converts numpy array inputs to CUDA tensors
-via `torch.from_numpy()`, since some benchmark environments pass numpy instead of tensors.
+via `torch.as_tensor()`. Uses `as_tensor` instead of `from_numpy()` because some cluster
+environments have numpy version mismatches where `from_numpy()` fails with
+"expected np.ndarray (got ndarray)".
 
 A warmup autotune (`warmup_attention_tiles()`) was tested but found worse configs
 in practice (101.6ms vs 98.5ms) and was removed. The 2-tier fallback
