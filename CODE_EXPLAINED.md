@@ -313,7 +313,6 @@ output = acc / l_i                  # final normalization
   - Encoder (head_dim=64): `BLOCK_M=128, BLOCK_N=128`, `num_stages=2, num_warps=8`
   - Decoder (head_dim=128): `BLOCK_M=128, BLOCK_N=64`, `num_stages=2, num_warps=8`
 - **Unknown GPUs**: tiles computed dynamically by `_compute_attention_tiles()`
-- Optional `_AUTOTUNE_CACHE` override from `warmup_attention_tiles()` (opt-in)
 
 **Features:**
 - `IS_CAUSAL` (constexpr): causal masking for decoder
@@ -669,7 +668,6 @@ Optimizations adopted or planned from analysis of other branches:
 | generate_v8b (KV cache) | internal | **-7.6ms** (monkey-patched from layers.py, uses decode(use_cache=True)) |
 | SDPA fallback for seq_q≤4 | internal | **-3ms** (PyTorch SDPA for KV-cached decode steps) |
 | GPUProfile + _KNOWN_CONFIGS + dynamic tiles | internal | portability (7 arch classifications, dynamic fallback) |
-| Warmup autotune (opt-in) | internal | opt-in tile benchmarking for fixed-shape attention |
 | Dead code cleanup | internal | -320 lines (removed legacy attention kernels) |
 
 ### Adopted (2026-03-15, fp16-throughout pipeline)

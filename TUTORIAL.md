@@ -399,9 +399,9 @@ All tile selection across the codebase uses `GPU.*`:
 The default property returns only 48KB, but Triton can use up to 99KB (RTX 5090)
 or 228KB (H200) via the optin mechanism.
 
-**Optional warmup autotune** (attention.py): `warmup_attention_tiles()` benchmarks
-tile configs on small tensors for fixed-shape attention. Opt-in only — auto-triggering
-found worse configs in practice.
+A warmup autotune (`warmup_attention_tiles()`) was tested but found worse configs
+in practice (101.6ms vs 98.5ms) and was removed. The 2-tier fallback
+(`_KNOWN_CONFIGS` → dynamic computation) handles all cases.
 
 ### 6.8 KV-Cached Generation (generate_v8b)
 ```python
@@ -425,7 +425,6 @@ the concatenation-based KV cache from model.py's `TextDecoder.__call__`.
 | generate_v8b (KV cache) | internal | **-7.6ms** | ADOPTED |
 | SDPA fallback for seq_q≤4 | internal | **-3ms** | ADOPTED |
 | GPUProfile + _KNOWN_CONFIGS + dynamic tiles | internal | portability | ADOPTED |
-| Warmup autotune (opt-in) | internal | portability | ADOPTED |
 | Dead code cleanup | internal | -320 lines | ADOPTED |
 | fp16 pipeline (remove float32 casts) | internal | **-11.5ms** | ADOPTED |
 | fp16 cuBLAS HGEMM (was bf16) | internal | ~-0.4ms | ADOPTED |

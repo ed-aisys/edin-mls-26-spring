@@ -189,7 +189,6 @@ GPU = GPUProfile()  # Replaces old _detect_gpu_tier()
 # SDPA fallback for KV-cached decode (seq_q <= 4):
 # torch.nn.functional.scaled_dot_product_attention — avoids Triton launch overhead
 
-# Optional: warmup_attention_tiles() in attention.py for fixed-shape autotune (opt-in)
 ```
 
 ---
@@ -246,7 +245,6 @@ python benchmark_detailed.py glm_asr_triton_template
 | generate_v8b (KV cache) | internal | **-7.6ms** | **ADOPTED** |
 | SDPA fallback for seq_q≤4 | internal | **-3ms** | **ADOPTED** |
 | GPUProfile + _KNOWN_CONFIGS + dynamic tiles | internal | portability | **ADOPTED** |
-| Warmup autotune (opt-in) | internal | portability | **ADOPTED** |
 | Dead code cleanup | internal | -320 lines | **ADOPTED** |
 | fp16 pipeline (remove float32 casts) | internal | **-11.5ms** | **ADOPTED** |
 | fp16 cuBLAS HGEMM (was bf16) | internal | ~-0.4ms | **ADOPTED** |
@@ -280,7 +278,6 @@ python benchmark_detailed.py glm_asr_triton_template
 - [x] generate_v8b with KV cache (monkey-patched, decode(use_cache=True)) — **-7.6ms**
 - [x] SDPA fallback for KV-cached decode (seq_q≤4) — **-3ms**
 - [x] GPUProfile with _KNOWN_CONFIGS + dynamic tile computation for cross-GPU portability
-- [x] Warmup autotune (opt-in) for fixed-shape attention in attention.py
 - [x] Dead code cleanup — removed ~320 lines of legacy attention kernels
 - [x] SwiGLU swizzle tested, rejected (+18ms regression on RTX 5090)
 - [x] @triton.autotune tested, rejected (lightweight: +0.7ms overhead; heavy kernels: massive regression)

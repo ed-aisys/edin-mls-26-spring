@@ -388,16 +388,16 @@ When `arch_name` is not in `_KNOWN_CONFIGS`, tiles are computed from shared memo
 - `_compute_matmul_tiles(smem_bytes)`: Accounts for fused SwiGLU worst case (gate + up tiles).
   Formula: `TILE_K * (TILE_M + 2*TILE_N) * 4 + 20KB overhead`
 
-#### 12.4 Warmup Autotune (attention.py, opt-in)
-- `warmup_attention_tiles()` benchmarks candidate tile configs for fixed-shape attention
-- Stores best config in `_AUTOTUNE_CACHE` keyed by `"{head_dim}_{seq_q}_{seq_k}_{is_causal}"`
-- NOT auto-triggered — must be called explicitly. Auto-triggering found worse configs
-  and caused regressions (101.6ms vs 98.5ms)
-- Only useful for encoder/prefill where shapes repeat; useless for decode where seq_k grows
+#### 12.4 Warmup Autotune (REMOVED in Session 12b)
+- `warmup_attention_tiles()` was implemented as opt-in autotune for fixed-shape attention
+- Tested and found worse configs (BLOCK_M=16 "won" micro-benchmarks but regressed full pipeline:
+  101.6ms vs 98.5ms)
+- Removed entirely — `_KNOWN_CONFIGS` + `_compute_attention_tiles()` handle all cases
+- ~100 lines of dead code eliminated
 
 #### 12.5 Module Updates
 - attention.py: Removed duplicate `_detect_gpu_tier()`, imports `GPU` from layers.
-  Tile selection uses `GPU.get_attention_tiles(head_dim, seq_q)` with optional `_AUTOTUNE_CACHE` override
+  Tile selection uses `GPU.get_attention_tiles(head_dim, seq_q)`
 - rope.py: Uses `GPU.rope_nstages` and `GPU.rope_nwarps` for fused RoPE pair kernel
 - layers.py: `Linear`, `MLP`, `EncoderMLP` tile sizes read from `GPU.matmul_tile_m/n/k`
 - `_GPU_TIER` retained as backward-compatibility alias
@@ -421,7 +421,7 @@ When `arch_name` is not in `_KNOWN_CONFIGS`, tiles are computed from shared memo
 | HIGH | fp16-throughout pipeline | internal | **-11.5ms** (110.0→98.5ms) | **ADOPTED** |
 | HIGH | Smaller flash attention tiles | meave | improved prefill | **ADOPTED** |
 | HIGH | GPUProfile + _KNOWN_CONFIGS + dynamic tiles | internal | portability (no regression) | **ADOPTED** |
-| HIGH | Warmup autotune (opt-in) | internal | portability (opt-in) | **ADOPTED** |
+| LOW | Warmup autotune (opt-in) | internal | found worse configs (101.6 vs 98.5ms) | Removed |
 | MEDIUM | Swizzled SwiGLU + larger tiles | yash/optimize | **+18ms regression** (123→141ms) | Rejected |
 | LOW | @triton.autotune for GELU/SiLU | majed | **+0.7ms overhead** (tuning warmup) | Rejected |
 | N/A | EncoderMLP.FUSED | yash/optimize | NOT APPLICABLE — model.py doesn't use EncoderMLP | Skipped |
@@ -748,9 +748,8 @@ tiles dynamically from the shared memory budget. The flash attention formula is:
 `(BLOCK_M + 2*BLOCK_N) * BLOCK_D * 4 + 20KB overhead`. The SwiGLU formula accounts
 for loading gate + up weight tiles: `TILE_K * (TILE_M + 2*TILE_N) * 4 + 20KB overhead`.
 
-An optional `warmup_attention_tiles()` function in attention.py benchmarks candidate
-tile configs for fixed-shape attention (encoder/prefill) and caches the fastest.
-This is opt-in only — not auto-triggered.
+A `warmup_attention_tiles()` function was implemented and tested but found worse configs
+in practice (101.6ms vs 98.5ms) — removed in Session 12b.
 
 ### 5. Further Kernel Optimizations (Lower Priority)
 - [x] ~~SDPA fallback for single-token decode~~ — **DONE** (Session 7, -3ms)
