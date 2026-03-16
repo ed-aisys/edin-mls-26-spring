@@ -5,7 +5,7 @@ speech-to-text model with Triton GPU kernels. Each branch made different archite
 about precision, fusion, tiling, and attention strategies.
 
 **Branches compared:**
-- **ankush (ours)** — `ankush-fp16-tiles` branch, 98.5ms
+- **ankush (ours)** — `ankush` branch, 98.5ms
 - **meave** — `origin/meave`, 127.8ms
 - **yash** — `origin/yash/optimize`, 128ms
 - **majed** — `origin/majed`, 187.9ms
@@ -61,7 +61,7 @@ All branches beat the 261.3ms example baseline. Our branch is **23% faster** tha
 | **Fused RoPE pair** | Yes (Q+K) | Yes (Q+K) | Yes (Q+K) | No (separate) |
 | **Fused RMSNorm→fp16** | Yes (kernel) | Yes (kernel) | Yes (kernel) | No |
 | **KV-cached generation** | Yes (monkey-patch) | No | No | No |
-| **GPU tier detection** | Yes (runtime) | No | No | No |
+| **GPU tier detection** | Yes (GPUProfile + _KNOWN_CONFIGS) | No | No | No |
 | **Autotune** | No | No | No | Yes (activations) |
 | **Tile swizzling** | No | No | Yes (SwiGLU) | No |
 
@@ -641,24 +641,46 @@ number of generated tokens grows.
 
 | Branch | Adapts to GPU? | How? |
 |--------|:-:|-------|
-| **ankush** | **Yes** | Runtime `_detect_gpu_tier()` at import time |
+| **ankush** | **Yes** | `GPUProfile` class + `_KNOWN_CONFIGS` table + dynamic tile computation |
 | meave | Partially | Hardcoded for consumer GPUs |
 | yash | No | Hardcoded for H200 datacenter |
 | majed | Partially | Conservative settings that work everywhere |
 
-**Ankush** detects GPU shared memory capacity at import time:
+**Ankush** uses a 3-tier GPU portability system:
+
+1. **`_KNOWN_CONFIGS` table** — Pre-tested tile sizes for 6 GPU architectures (RTX 3090/4090/5090,
+   A100, H100/H200, B200). Each entry stores optimal attention tiles (per head_dim), matmul tiles,
+   and RoPE launch config. This is the fast path for known hardware.
+
+2. **`GPUProfile` class** — Detects `sm_version`, `shared_memory_per_block_optin`, and `gpu_name`
+   at import time. Classifies the GPU into one of 7+ architectures and looks up `_KNOWN_CONFIGS`.
+   Uses `shared_memory_per_block_optin` (99KB on RTX 5090, 228KB on H200) — NOT
+   `shared_memory_per_block` which only returns 48KB.
+
+3. **Dynamic tile computation** — For unknown GPU architectures not in `_KNOWN_CONFIGS`,
+   tiles are computed from the shared memory budget:
+   - `_compute_attention_tiles()`: `(BLOCK_M + 2*BLOCK_N) * BLOCK_D * 4 + 20KB overhead`
+   - `_compute_matmul_tiles()`: `TILE_K * (TILE_M + 2*TILE_N) * 4 + 20KB overhead` (SwiGLU worst case)
 
 ```python
-def _detect_gpu_tier():
-    props = torch.cuda.get_device_properties(0)
-    if props.max_shared_memory_size_per_block > 120 * 1024:
-        return 'datacenter'   # H200/B200: 228KB shared mem
-    return 'consumer'         # RTX 4090/5090: ~100KB shared mem
+class GPUProfile:
+    def __init__(self):
+        props = torch.cuda.get_device_properties(0)
+        self.sm_version = torch.cuda.get_device_capability(0)
+        self.smem_per_block = props.shared_memory_per_block_optin  # 99KB-228KB
+        # Classify: blackwell_consumer, ada, hopper, blackwell_dc, ampere_dc, ampere_consumer, older
+        known = _KNOWN_CONFIGS.get(self.arch_name)
+        if known:
+            self.attn_tiles = known['attn_tiles']          # Tested configs
+        else:
+            self.attn_tiles = {hd: _compute_attention_tiles(hd, self.smem_per_block) for hd in (64, 128)}
+
+GPU = GPUProfile()  # Computed once at import time
 ```
 
 This affects tile sizes, num_stages, and num_warps across Flash Attention, SwiGLU, Linear,
-and RoPE. Consumer GPUs get smaller tiles + num_stages=1; datacenter GPUs get larger tiles +
-num_stages=2.
+and RoPE. Consumer GPUs get smaller tiles + `num_stages=1`; datacenter GPUs get larger tiles +
+`num_stages=2`.
 
 **Yash** uses aggressive settings (`num_warps=16, num_stages=7, 128x128 tiles`) tuned for
 H200 — these would OOM or regress on consumer GPUs with ~100KB shared memory.
