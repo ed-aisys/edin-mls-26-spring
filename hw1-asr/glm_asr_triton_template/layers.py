@@ -1370,6 +1370,9 @@ def _generate_v8b(
     audio_pad_token_id=59260,
 ):
     """KV-cached O(n) generation using model.decode() with use_cache=True."""
+    # Ensure input_features is a tensor (some benchmarks pass numpy arrays)
+    if not isinstance(input_features, torch.Tensor):
+        input_features = torch.from_numpy(input_features).to(dtype=torch.float32, device='cuda')
     # Encode audio
     audio_embeds = self.encode_audio(input_features, input_features_mask)
 
