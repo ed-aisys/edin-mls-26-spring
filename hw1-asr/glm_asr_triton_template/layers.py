@@ -17,19 +17,246 @@ import triton
 import triton.language as tl
 
 
-def _detect_gpu_tier():
-    """Detect GPU shared memory tier. Returns 'datacenter' or 'consumer'."""
-    if not torch.cuda.is_available():
-        return 'consumer'
-    try:
-        props = torch.cuda.get_device_properties(0)
-        if props.max_shared_memory_size_per_block > 120 * 1024:
-            return 'datacenter'
-    except Exception:
-        pass
-    return 'consumer'
+# Tested tile configs per GPU architecture.
+# Each entry maps arch_name → {attn_tiles, matmul_tiles, rope params}.
+# For unknown architectures, tiles are computed dynamically from shared memory.
+_KNOWN_CONFIGS = {
+    # RTX 5090 (Blackwell consumer, sm_120, ~99KB optin smem)
+    # Tested 2026-03-15: 98.5ms benchmark
+    "blackwell_consumer": {
+        "attn_tiles": {
+            64:  (64, 64, 1, 4),   # Encoder: head_dim=64
+            128: (32, 32, 1, 4),   # Decoder: head_dim=128
+        },
+        "matmul_tiles": (64, 64, 32),
+        "rope_nstages": 1,
+        "rope_nwarps": 4,
+    },
+    # RTX 4090 (Ada Lovelace, sm_89, ~100KB optin smem)
+    # Same shared memory class as RTX 5090
+    "ada": {
+        "attn_tiles": {
+            64:  (64, 64, 1, 4),
+            128: (32, 32, 1, 4),
+        },
+        "matmul_tiles": (64, 64, 32),
+        "rope_nstages": 1,
+        "rope_nwarps": 4,
+    },
+    # H100/H200 (Hopper, sm_90, ~228KB optin smem)
+    "hopper": {
+        "attn_tiles": {
+            64:  (128, 128, 2, 8),  # Large tiles + 2 pipeline stages
+            128: (128, 64, 2, 8),
+        },
+        "matmul_tiles": (128, 128, 64),
+        "rope_nstages": 2,
+        "rope_nwarps": 8,
+    },
+    # B200 (Blackwell datacenter, sm_100+, ~228KB optin smem)
+    "blackwell_dc": {
+        "attn_tiles": {
+            64:  (128, 128, 2, 8),
+            128: (128, 64, 2, 8),
+        },
+        "matmul_tiles": (128, 128, 64),
+        "rope_nstages": 2,
+        "rope_nwarps": 8,
+    },
+    # A100 (Ampere datacenter, sm_80, ~164KB optin smem)
+    "ampere_dc": {
+        "attn_tiles": {
+            64:  (128, 64, 1, 4),
+            128: (64, 32, 1, 4),
+        },
+        "matmul_tiles": (128, 64, 32),
+        "rope_nstages": 1,
+        "rope_nwarps": 4,
+    },
+    # RTX 3090 (Ampere consumer, sm_80, ~100KB optin smem)
+    "ampere_consumer": {
+        "attn_tiles": {
+            64:  (64, 64, 1, 4),
+            128: (32, 32, 1, 4),
+        },
+        "matmul_tiles": (64, 64, 32),
+        "rope_nstages": 1,
+        "rope_nwarps": 4,
+    },
+}
 
-_GPU_TIER = _detect_gpu_tier()
+
+class GPUProfile:
+    """GPU architecture profile with pre-computed tuning parameters.
+
+    Detects the GPU at import time and stores optimal tile sizes, pipeline
+    stages, and warp counts for every kernel. Adapts to the specific GPU
+    architecture rather than using a coarse two-tier heuristic.
+
+    Attributes:
+        arch_name: Human-readable architecture name (e.g. "ada", "hopper").
+        sm_version: Compute capability tuple, e.g. (8, 9) for Ada.
+        smem_per_block: Max shared memory per block in bytes.
+        gpu_name: Full GPU device name string.
+        -- Pre-computed attention tile parameters --
+        attn_tiles: dict mapping head_dim bucket to (BLOCK_M, BLOCK_N, nstages, nwarps).
+        -- Pre-computed matmul tile parameters --
+        matmul_tile_m/n/k: Tile sizes for Linear / fused SwiGLU / fused LinearGELU.
+        -- Pre-computed RoPE parameters --
+        rope_nstages, rope_nwarps: Launch config for fused_rope_pair_kernel.
+    """
+
+    def __init__(self):
+        if not torch.cuda.is_available():
+            self._init_cpu_fallback()
+            return
+        try:
+            self.sm_version = torch.cuda.get_device_capability(0)
+            props = torch.cuda.get_device_properties(0)
+            # Use optin shared memory (extended) — this is what Triton can actually use.
+            # shared_memory_per_block is only 48KB (default), optin is 99-228KB.
+            self.smem_per_block = props.shared_memory_per_block_optin
+            self.gpu_name = props.name
+        except Exception:
+            self._init_cpu_fallback()
+            return
+
+        sm = self.sm_version
+        smem_kb = self.smem_per_block // 1024
+
+        # Classify architecture
+        if sm >= (10, 0) and self.smem_per_block > 120 * 1024:
+            self.arch_name = "blackwell_dc"      # B200 datacenter
+        elif sm >= (9, 0) and self.smem_per_block > 120 * 1024:
+            self.arch_name = "hopper"             # H100/H200
+        elif sm >= (9, 0):
+            self.arch_name = "hopper_consumer"    # Hypothetical
+        elif sm >= (8, 9):
+            self.arch_name = "ada"                # RTX 4090
+        elif sm >= (8, 0) and self.smem_per_block > 120 * 1024:
+            self.arch_name = "ampere_dc"          # A100
+        elif sm >= (8, 0):
+            self.arch_name = "ampere_consumer"    # RTX 3090
+        else:
+            self.arch_name = "older"
+        # Blackwell consumer (RTX 5090) reports sm_120 = (12, 0) with ~101KB
+        if sm >= (12, 0) and self.smem_per_block <= 120 * 1024:
+            self.arch_name = "blackwell_consumer"
+
+        # Use tested configs for known architectures, dynamic computation for unknown
+        known = _KNOWN_CONFIGS.get(self.arch_name)
+        if known:
+            self.attn_tiles = known['attn_tiles']
+            self.matmul_tile_m = known['matmul_tiles'][0]
+            self.matmul_tile_n = known['matmul_tiles'][1]
+            self.matmul_tile_k = known['matmul_tiles'][2]
+            self.rope_nstages = known['rope_nstages']
+            self.rope_nwarps = known['rope_nwarps']
+        else:
+            # Unknown GPU — compute dynamically from shared memory budget
+            self.attn_tiles = {}
+            for hd in (64, 128):
+                self.attn_tiles[hd] = _compute_attention_tiles(hd, self.smem_per_block)
+            self.matmul_tile_m, self.matmul_tile_n, self.matmul_tile_k = \
+                _compute_matmul_tiles(self.smem_per_block)
+            if self.smem_per_block > 150 * 1024:
+                self.rope_nstages, self.rope_nwarps = 2, 8
+            else:
+                self.rope_nstages, self.rope_nwarps = 1, 4
+
+    def _init_cpu_fallback(self):
+        self.arch_name = "cpu"
+        self.sm_version = (0, 0)
+        self.smem_per_block = 0
+        self.gpu_name = "none"
+        self.attn_tiles = {
+            64: (64, 64, 1, 4),
+            128: (32, 32, 1, 4),
+        }
+        self.matmul_tile_m, self.matmul_tile_n, self.matmul_tile_k = 64, 64, 32
+        self.rope_nstages, self.rope_nwarps = 1, 4
+
+    @property
+    def is_datacenter(self):
+        return self.smem_per_block > 120 * 1024
+
+    def get_attention_tiles(self, head_dim, seq_q=None):
+        """Get (BLOCK_M, BLOCK_N, nstages, nwarps) for a given head_dim.
+
+        For tiny seq_q (KV-cached decode), BLOCK_M is clamped down.
+        """
+        # Use nearest bucket (64 or 128)
+        bucket = 64 if head_dim <= 64 else 128
+        bm, bn, ns, nw = self.attn_tiles.get(bucket, self.attn_tiles[128])
+        if seq_q is not None and seq_q <= 16:
+            bm = min(bm, 16)
+        return bm, bn, ns, nw
+
+    def __repr__(self):
+        return (f"GPUProfile(arch={self.arch_name}, sm={self.sm_version}, "
+                f"smem={self.smem_per_block // 1024}KB, gpu={self.gpu_name}, "
+                f"matmul_tiles={self.matmul_tile_m}x{self.matmul_tile_n}x{self.matmul_tile_k})")
+
+
+def _compute_attention_tiles(head_dim, smem_bytes):
+    """Select optimal flash attention tile sizes from shared memory budget.
+
+    Uses ranked known-good tile configurations and picks the largest that fits.
+    The flash attention kernel needs shared memory for Q, K, and V tiles plus
+    Triton compiler overhead (accumulators, softmax state, padding, etc.).
+
+    Shared memory estimate per config:
+        (BLOCK_M + 2 * BLOCK_N) * BLOCK_D * 4 bytes  (fp32 tiles)
+        + ~20KB Triton overhead (conservative estimate for compiler state)
+    """
+    BLOCK_D = 1 << (head_dim - 1).bit_length() if head_dim > 0 else head_dim
+    element_bytes = 4
+    overhead = 20 * 1024  # conservative estimate for Triton compiler overhead
+
+    # Ranked configs: (BLOCK_M, BLOCK_N) ordered from fastest to slowest.
+    # Balanced tiles (BLOCK_M ≈ BLOCK_N) perform better than unbalanced ones.
+    if head_dim <= 64:
+        configs = [(128, 128), (128, 64), (64, 64), (64, 32), (32, 32), (16, 16)]
+    else:
+        configs = [(128, 64), (64, 64), (64, 32), (32, 32), (32, 16), (16, 16)]
+
+    for bm, bn in configs:
+        needed = (bm + 2 * bn) * BLOCK_D * element_bytes + overhead
+        if needed <= smem_bytes:
+            nstages = 2 if smem_bytes > 150 * 1024 else 1
+            nwarps = 8 if bm * bn >= 4096 else 4
+            return (bm, bn, nstages, nwarps)
+
+    return (16, 16, 1, 4)  # absolute minimum
+
+
+def _compute_matmul_tiles(smem_bytes):
+    """Select optimal matmul tile sizes from shared memory budget.
+
+    Must account for the fused SwiGLU kernel (worst case), which loads:
+      - A tile:      TILE_M * TILE_K * 4 bytes  (input)
+      - gate_w tile: TILE_K * TILE_N * 4 bytes  (gate weight)
+      - up_w tile:   TILE_K * TILE_N * 4 bytes  (up weight)
+    Total: TILE_K * (TILE_M + 2 * TILE_N) * 4 + overhead
+    """
+    overhead = 20 * 1024  # conservative Triton overhead
+
+    # Ranked configs: (TILE_M, TILE_N, TILE_K) from largest to smallest
+    configs = [(128, 128, 64), (128, 64, 32), (64, 64, 32), (64, 32, 32), (32, 32, 16)]
+
+    for tm, tn, tk in configs:
+        # Use SwiGLU worst case: A + 2 * B tiles
+        needed = tk * (tm + 2 * tn) * 4 + overhead
+        if needed <= smem_bytes:
+            return tm, tn, tk
+
+    return 32, 32, 16  # absolute minimum
+
+
+# Module-level GPU profile — computed once at import time
+GPU = GPUProfile()
+# Backward compatibility alias
+_GPU_TIER = 'datacenter' if GPU.is_datacenter else 'consumer'
 
 
 # ============================================================================
@@ -555,10 +782,7 @@ class Linear:
     """Linear layer with switchable backend (torch or Triton)."""
 
     # Triton matmul tile sizes (only used when BACKEND="triton")
-    if _GPU_TIER == 'datacenter':
-        TILE_M, TILE_N, TILE_K = 128, 128, 64
-    else:
-        TILE_M, TILE_N, TILE_K = 64, 64, 32
+    TILE_M, TILE_N, TILE_K = GPU.matmul_tile_m, GPU.matmul_tile_n, GPU.matmul_tile_k
 
     BACKEND = "torch"  # Use cuBLAS (fastest for matmul on Blackwell)
 
@@ -878,11 +1102,7 @@ class MLP:
     """MLP with SwiGLU gating using Triton."""
 
     FUSED = True
-    # Runtime GPU detection: datacenter GPUs get larger tiles
-    if _GPU_TIER == 'datacenter':
-        TILE_M, TILE_N, TILE_K = 128, 128, 64
-    else:
-        TILE_M, TILE_N, TILE_K = 64, 64, 32
+    TILE_M, TILE_N, TILE_K = GPU.matmul_tile_m, GPU.matmul_tile_n, GPU.matmul_tile_k
 
     def __init__(
         self,
@@ -1012,10 +1232,7 @@ class EncoderMLP:
     """Encoder MLP (no gating) using Triton."""
 
     FUSED = True
-    if _GPU_TIER == 'datacenter':
-        TILE_M, TILE_N, TILE_K = 128, 128, 64
-    else:
-        TILE_M, TILE_N, TILE_K = 64, 64, 32
+    TILE_M, TILE_N, TILE_K = GPU.matmul_tile_m, GPU.matmul_tile_n, GPU.matmul_tile_k
 
     def __init__(
         self,

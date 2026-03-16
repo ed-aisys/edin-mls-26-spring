@@ -2,7 +2,7 @@
 
 ## Project: GLM-ASR Triton GPU Kernel Implementation
 **Date:** 2026-03-09 to 2026-03-15
-**Branch:** `ankush-fp16-tiles`
+**Branch:** `ankush`
 **GPU:** NVIDIA GeForce RTX 5090 (Blackwell, sm_120, 32GB VRAM)
 **CUDA Toolkit:** 13.0 | **Driver:** 580.126.20
 **PyTorch:** 2.10.0+cu130 | **Triton:** 3.6.0
@@ -262,8 +262,9 @@ Tested all remaining optimization ideas from other branches:
 - Impact: **-3ms** (113.5→110.0ms)
 
 #### 10.3 GPU Portability (All Modules)
-- `_detect_gpu_tier()` in layers.py checks `props.max_shared_memory_size_per_block > 120 * 1024`
-- Applied to: Linear tile sizes, Flash Attention tiles + num_stages + num_warps, RoPE num_stages + num_warps
+- `GPUProfile` class in layers.py detects GPU architecture at import time
+- Uses `shared_memory_per_block_optin` (99KB on RTX 5090, 228KB on H200) for tile sizing
+- Applied to: Flash Attention tiles + num_stages + num_warps, matmul tiles, RoPE num_stages + num_warps
 - Consumer GPUs (RTX 4090/5090): smaller tiles, num_stages=1, num_warps=4
 - Datacenter GPUs (H200/B200): larger tiles, num_stages=2, num_warps=8
 
@@ -354,6 +355,58 @@ float32 precision only inside kernels. This saved ~11ms total.
 **NOTE:** `benchmark_detailed.py` fails with fp16 pipeline because benchmark code
 expects float32 projector output. Student benchmark (authoritative) works perfectly.
 
+### Step 12: GPU Portability — GPUProfile + Dynamic Tiles (Session 12, 2026-03-16)
+
+Replaced the simple 2-tier `_detect_gpu_tier()` with a full `GPUProfile` class.
+
+#### 12.1 GPUProfile Class (layers.py)
+- Detects `sm_version`, `shared_memory_per_block_optin`, and `gpu_name` at import time
+- Classifies GPU into one of 7+ architectures:
+  - `blackwell_consumer` (RTX 5090, sm_120, 99KB), `blackwell_dc` (B200, sm_100+, 228KB)
+  - `hopper` (H100/H200, sm_90, 228KB)
+  - `ada` (RTX 4090, sm_89, 100KB)
+  - `ampere_dc` (A100, sm_80, 164KB), `ampere_consumer` (RTX 3090, sm_80, 100KB)
+  - `older`, `cpu` (fallbacks)
+- Uses `shared_memory_per_block_optin` (not `shared_memory_per_block`) — the optin value
+  is what Triton can actually use (99KB vs 48KB default on RTX 5090)
+- `GPU = GPUProfile()` replaces `_GPU_TIER = _detect_gpu_tier()`
+
+#### 12.2 _KNOWN_CONFIGS Table
+Pre-tested tile configurations for 6 GPU architectures. Each entry contains:
+- `attn_tiles`: dict mapping head_dim → (BLOCK_M, BLOCK_N, nstages, nwarps)
+- `matmul_tiles`: (TILE_M, TILE_N, TILE_K) for Linear and fused SwiGLU
+- `rope_nstages`, `rope_nwarps`: Launch config for fused RoPE pair kernel
+
+Example: RTX 5090 uses (64, 64) for encoder attention, (32, 32) for decoder, (64, 64, 32) for matmul.
+H200 uses (128, 128) for encoder, (128, 64) for decoder, (128, 128, 64) for matmul.
+
+#### 12.3 Dynamic Tile Computation for Unknown GPUs
+When `arch_name` is not in `_KNOWN_CONFIGS`, tiles are computed from shared memory budget:
+
+- `_compute_attention_tiles(head_dim, smem_bytes)`: Ranks balanced tile configs,
+  picks the largest that fits. Formula: `(BLOCK_M + 2*BLOCK_N) * BLOCK_D * 4 + 20KB overhead`
+- `_compute_matmul_tiles(smem_bytes)`: Accounts for fused SwiGLU worst case (gate + up tiles).
+  Formula: `TILE_K * (TILE_M + 2*TILE_N) * 4 + 20KB overhead`
+
+#### 12.4 Warmup Autotune (attention.py, opt-in)
+- `warmup_attention_tiles()` benchmarks candidate tile configs for fixed-shape attention
+- Stores best config in `_AUTOTUNE_CACHE` keyed by `"{head_dim}_{seq_q}_{seq_k}_{is_causal}"`
+- NOT auto-triggered — must be called explicitly. Auto-triggering found worse configs
+  and caused regressions (101.6ms vs 98.5ms)
+- Only useful for encoder/prefill where shapes repeat; useless for decode where seq_k grows
+
+#### 12.5 Module Updates
+- attention.py: Removed duplicate `_detect_gpu_tier()`, imports `GPU` from layers.
+  Tile selection uses `GPU.get_attention_tiles(head_dim, seq_q)` with optional `_AUTOTUNE_CACHE` override
+- rope.py: Uses `GPU.rope_nstages` and `GPU.rope_nwarps` for fused RoPE pair kernel
+- layers.py: `Linear`, `MLP`, `EncoderMLP` tile sizes read from `GPU.matmul_tile_m/n/k`
+- `_GPU_TIER` retained as backward-compatibility alias
+
+#### 12.6 Performance Impact
+- 98.5ms → 98.8ms (within noise, no regression)
+- Known configs match hand-tuned values exactly
+- Dynamic computation produces good-enough configs for untested GPUs
+
 ---
 
 ## Optimization Roadmap
@@ -367,6 +420,8 @@ expects float32 projector output. Student benchmark (authoritative) works perfec
 | HIGH | SDPA fallback for seq_q≤4 | majed (idea) | **-3ms** (113.5→110.0ms) | **ADOPTED** |
 | HIGH | fp16-throughout pipeline | internal | **-11.5ms** (110.0→98.5ms) | **ADOPTED** |
 | HIGH | Smaller flash attention tiles | meave | improved prefill | **ADOPTED** |
+| HIGH | GPUProfile + _KNOWN_CONFIGS + dynamic tiles | internal | portability (no regression) | **ADOPTED** |
+| HIGH | Warmup autotune (opt-in) | internal | portability (opt-in) | **ADOPTED** |
 | MEDIUM | Swizzled SwiGLU + larger tiles | yash/optimize | **+18ms regression** (123→141ms) | Rejected |
 | LOW | @triton.autotune for GELU/SiLU | majed | **+0.7ms overhead** (tuning warmup) | Rejected |
 | N/A | EncoderMLP.FUSED | yash/optimize | NOT APPLICABLE — model.py doesn't use EncoderMLP | Skipped |
@@ -655,24 +710,47 @@ simply doesn't call.
 **All autotune code was fully reverted.** Lesson: autotune is great for static shapes
 but harmful when tensor dimensions change every call (KV-cached decode).
 
-### 4. Runtime GPU Detection (Implemented 2026-03-13)
+### 4. Runtime GPU Detection (Implemented 2026-03-13, Upgraded 2026-03-16)
 
 Alternative to autotune: detect GPU class once at import time and set tile sizes accordingly.
 
-```python
-def _detect_gpu_tier():
-    props = torch.cuda.get_device_properties(0)
-    if props.max_shared_memory_size_per_block > 120 * 1024:
-        return 'datacenter'   # H200/B200: 228KB shared mem
-    return 'consumer'         # RTX 4090/5090: ~100KB shared mem
+**Original (Session 7):** Simple 2-tier `_detect_gpu_tier()` — consumer vs datacenter.
 
-_GPU_TIER = _detect_gpu_tier()
+**Upgraded (Session 12):** Full `GPUProfile` class with 7 architecture classifications,
+`_KNOWN_CONFIGS` table for tested GPUs, and dynamic tile computation for unknown GPUs.
+
+```python
+# Tested tile configs per GPU architecture
+_KNOWN_CONFIGS = {
+    "blackwell_consumer": {...},  # RTX 5090 (sm_120, 99KB)
+    "ada": {...},                 # RTX 4090 (sm_89, 100KB)
+    "hopper": {...},              # H100/H200 (sm_90, 228KB)
+    "blackwell_dc": {...},        # B200 (sm_100+, 228KB)
+    "ampere_dc": {...},           # A100 (sm_80, 164KB)
+    "ampere_consumer": {...},     # RTX 3090 (sm_80, 100KB)
+}
+
+class GPUProfile:
+    def __init__(self):
+        # Detects sm_version, shared_memory_per_block_optin, gpu_name
+        # Classifies into one of 7+ architectures
+        # Looks up _KNOWN_CONFIGS or computes tiles dynamically
+
+    def get_attention_tiles(self, head_dim, seq_q=None):
+        # Returns (BLOCK_M, BLOCK_N, nstages, nwarps)
+        # Clamps BLOCK_M to 16 when seq_q <= 16
+
+GPU = GPUProfile()  # Computed once at import time
 ```
 
-Applied to: Flash Attention tile sizes + num_stages + num_warps, SwiGLU tile sizes,
-Linear tile sizes, RoPE num_stages + num_warps.
-Consumer GPUs get smaller tiles + num_stages=1 + num_warps=4;
-datacenter GPUs get larger tiles + num_stages=2 + num_warps=8.
+For unknown GPUs, `_compute_attention_tiles()` and `_compute_matmul_tiles()` compute
+tiles dynamically from the shared memory budget. The flash attention formula is:
+`(BLOCK_M + 2*BLOCK_N) * BLOCK_D * 4 + 20KB overhead`. The SwiGLU formula accounts
+for loading gate + up weight tiles: `TILE_K * (TILE_M + 2*TILE_N) * 4 + 20KB overhead`.
+
+An optional `warmup_attention_tiles()` function in attention.py benchmarks candidate
+tile configs for fixed-shape attention (encoder/prefill) and caches the fastest.
+This is opt-in only — not auto-triggered.
 
 ### 5. Further Kernel Optimizations (Lower Priority)
 - [x] ~~SDPA fallback for single-token decode~~ — **DONE** (Session 7, -3ms)

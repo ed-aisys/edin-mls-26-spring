@@ -161,19 +161,35 @@ Linear._HALF_DTYPE = torch.float16     # Actual dtype: fp16 (faster HGEMM on RTX
 ```
 Output stays fp16 (no `.float()` conversion), keeping the entire pipeline in fp16.
 
-### Flash Attention Configuration (GPU-Tier Aware)
+### GPU Detection: GPUProfile (layers.py)
 ```python
-# Consumer GPUs (RTX 4090/5090, ~100KB shared mem):
-if head_dim <= 64:   BLOCK_M, BLOCK_N = 64, 64   # Encoder (smaller tiles from meave)
-else:                BLOCK_M, BLOCK_N = 32, 32    # Decoder (smaller tiles from meave)
-if seq_q <= 16:      BLOCK_M = 16                 # Tiny queries (KV-cached decode)
-# num_stages=1, num_warps=4
+# GPUProfile detects GPU architecture at import time
+GPU = GPUProfile()  # Replaces old _detect_gpu_tier()
 
-# Datacenter GPUs (H200/B200, ~228KB shared mem):
-# Larger tiles, num_stages=2, num_warps=8
+# Reads: sm_version, shared_memory_per_block_optin, gpu_name
+# Classifies: blackwell_consumer, ada, hopper, blackwell_dc, ampere_dc, ampere_consumer, older
+
+# _KNOWN_CONFIGS table stores tested tile sizes for 6 GPU architectures
+# For unknown GPUs: _compute_attention_tiles() and _compute_matmul_tiles()
+# compute tiles dynamically from shared memory budget
+```
+
+### Flash Attention Configuration (GPUProfile-Aware)
+```python
+# Tile selection via GPU.get_attention_tiles(head_dim, seq_q):
+# Consumer GPUs (RTX 4090/5090, ~100KB optin shared mem):
+#   head_dim=64:  BLOCK_M=64,  BLOCK_N=64,  num_stages=1, num_warps=4
+#   head_dim=128: BLOCK_M=32,  BLOCK_N=32,  num_stages=1, num_warps=4
+#   seq_q <= 16:  BLOCK_M clamped to 16
+
+# Datacenter GPUs (H200/B200, ~228KB optin shared mem):
+#   head_dim=64:  BLOCK_M=128, BLOCK_N=128, num_stages=2, num_warps=8
+#   head_dim=128: BLOCK_M=128, BLOCK_N=64,  num_stages=2, num_warps=8
 
 # SDPA fallback for KV-cached decode (seq_q <= 4):
 # torch.nn.functional.scaled_dot_product_attention — avoids Triton launch overhead
+
+# Optional: warmup_attention_tiles() in attention.py for fixed-shape autotune (opt-in)
 ```
 
 ---
@@ -229,7 +245,8 @@ python benchmark_detailed.py glm_asr_triton_template
 | bf16 LayerNorm output | internal | **-0.7ms** | **ADOPTED** |
 | generate_v8b (KV cache) | internal | **-7.6ms** | **ADOPTED** |
 | SDPA fallback for seq_q≤4 | internal | **-3ms** | **ADOPTED** |
-| Runtime GPU detection | internal | portability | **ADOPTED** |
+| GPUProfile + _KNOWN_CONFIGS + dynamic tiles | internal | portability | **ADOPTED** |
+| Warmup autotune (opt-in) | internal | portability | **ADOPTED** |
 | Dead code cleanup | internal | -320 lines | **ADOPTED** |
 | fp16 pipeline (remove float32 casts) | internal | **-11.5ms** | **ADOPTED** |
 | fp16 cuBLAS HGEMM (was bf16) | internal | ~-0.4ms | **ADOPTED** |
@@ -262,7 +279,8 @@ python benchmark_detailed.py glm_asr_triton_template
 - [x] bf16 LayerNorm output — **-0.7ms**
 - [x] generate_v8b with KV cache (monkey-patched, decode(use_cache=True)) — **-7.6ms**
 - [x] SDPA fallback for KV-cached decode (seq_q≤4) — **-3ms**
-- [x] Runtime GPU detection for cross-GPU portability
+- [x] GPUProfile with _KNOWN_CONFIGS + dynamic tile computation for cross-GPU portability
+- [x] Warmup autotune (opt-in) for fixed-shape attention in attention.py
 - [x] Dead code cleanup — removed ~320 lines of legacy attention kernels
 - [x] SwiGLU swizzle tested, rejected (+18ms regression on RTX 5090)
 - [x] @triton.autotune tested, rejected (lightweight: +0.7ms overhead; heavy kernels: massive regression)

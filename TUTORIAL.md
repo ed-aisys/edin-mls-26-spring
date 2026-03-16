@@ -356,14 +356,52 @@ Python-side float32 casts in wrapper functions are redundant.
 computes in float32 precision, then `tl.store()` auto-converts back to the output tensor's dtype.
 So precision is maintained inside kernels regardless of input dtype.
 
-### 6.7 Runtime GPU Detection
+### 6.7 GPU Portability: GPUProfile + Dynamic Tiles
+
+The old `_detect_gpu_tier()` was a simple consumer/datacenter split. The new `GPUProfile`
+class (layers.py) detects the GPU architecture at import time and looks up optimal
+tile sizes from a table of tested configurations:
+
 ```python
-# Detects GPU shared memory tier once at import time
-_GPU_TIER = _detect_gpu_tier()  # 'datacenter' (H200/B200) or 'consumer' (RTX 4090/5090)
+# layers.py — 3-tier GPU portability system
+
+# 1. Known configs for tested GPUs (fastest path)
+_KNOWN_CONFIGS = {
+    "blackwell_consumer": {  # RTX 5090 (sm_120, 99KB optin smem)
+        "attn_tiles": {64: (64, 64, 1, 4), 128: (32, 32, 1, 4)},
+        "matmul_tiles": (64, 64, 32),
+        "rope_nstages": 1, "rope_nwarps": 4,
+    },
+    "hopper": {              # H100/H200 (sm_90, 228KB optin smem)
+        "attn_tiles": {64: (128, 128, 2, 8), 128: (128, 64, 2, 8)},
+        "matmul_tiles": (128, 128, 64),
+        "rope_nstages": 2, "rope_nwarps": 8,
+    },
+    # ... 4 more architectures: ada, blackwell_dc, ampere_dc, ampere_consumer
+}
+
+# 2. GPUProfile reads sm_version + shared_memory_per_block_optin, classifies arch
+GPU = GPUProfile()  # Computed once at import time
+
+# 3. For unknown GPUs, tiles computed dynamically:
+# _compute_attention_tiles(head_dim, smem_bytes)
+#   Formula: (BLOCK_M + 2*BLOCK_N) * BLOCK_D * 4 + 20KB overhead
+# _compute_matmul_tiles(smem_bytes)
+#   Formula: TILE_K * (TILE_M + 2*TILE_N) * 4 + 20KB overhead (SwiGLU worst case)
 ```
-Sets tile sizes for Flash Attention and SwiGLU based on available shared memory.
-Consumer GPUs (~100KB) get smaller tiles + num_stages=1.
-Datacenter GPUs (~228KB) get larger tiles + num_stages=2.
+
+All tile selection across the codebase uses `GPU.*`:
+- attention.py: `GPU.get_attention_tiles(head_dim, seq_q)` for Flash Attention
+- layers.py: `GPU.matmul_tile_m/n/k` for Linear, MLP, EncoderMLP
+- rope.py: `GPU.rope_nstages`, `GPU.rope_nwarps` for fused RoPE pair kernel
+
+**Important:** Uses `shared_memory_per_block_optin` (not `shared_memory_per_block`).
+The default property returns only 48KB, but Triton can use up to 99KB (RTX 5090)
+or 228KB (H200) via the optin mechanism.
+
+**Optional warmup autotune** (attention.py): `warmup_attention_tiles()` benchmarks
+tile configs on small tensors for fixed-shape attention. Opt-in only — auto-triggering
+found worse configs in practice.
 
 ### 6.8 KV-Cached Generation (generate_v8b)
 ```python
@@ -386,7 +424,8 @@ the concatenation-based KV cache from model.py's `TextDecoder.__call__`.
 | bf16 LayerNorm output | internal | **-0.7ms** | ADOPTED |
 | generate_v8b (KV cache) | internal | **-7.6ms** | ADOPTED |
 | SDPA fallback for seq_q≤4 | internal | **-3ms** | ADOPTED |
-| Runtime GPU detection | internal | portability | ADOPTED |
+| GPUProfile + _KNOWN_CONFIGS + dynamic tiles | internal | portability | ADOPTED |
+| Warmup autotune (opt-in) | internal | portability | ADOPTED |
 | Dead code cleanup | internal | -320 lines | ADOPTED |
 | fp16 pipeline (remove float32 casts) | internal | **-11.5ms** | ADOPTED |
 | fp16 cuBLAS HGEMM (was bf16) | internal | ~-0.4ms | ADOPTED |

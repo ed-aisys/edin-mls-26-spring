@@ -14,25 +14,108 @@ import triton.language as tl
 from typing import Optional, Tuple
 
 
-def _detect_gpu_tier():
-    """Detect GPU shared memory tier at import time.
-    Returns 'datacenter' for H200/B200 (228KB smem) or 'consumer' for 4090/5090 (~100KB)."""
-    if not torch.cuda.is_available():
-        return 'consumer'
-    try:
-        sm_major = torch.cuda.get_device_capability(0)[0]
-        # Hopper (sm_90) datacenter has 228KB; Blackwell consumer (sm_120) has 101KB
-        # Both sm_90 (H100/H200) and sm_100 (B200 datacenter) have large shared memory
-        # Consumer Blackwell (sm_120, RTX 5090) has ~101KB
-        props = torch.cuda.get_device_properties(0)
-        smem_per_block = props.max_shared_memory_size_per_block  # bytes
-        if smem_per_block > 120 * 1024:  # >120KB = datacenter class
-            return 'datacenter'
-    except Exception:
-        pass
-    return 'consumer'
+from layers import GPU
 
-_GPU_TIER = _detect_gpu_tier()
+# Warmup autotune cache: maps shape signature → best (BLOCK_M, BLOCK_N, nstages, nwarps)
+_AUTOTUNE_CACHE = {}
+
+
+def warmup_attention_tiles(seq_q, seq_k, head_dim, num_batch_heads, is_causal=False, n_trials=3):
+    """One-time warmup autotune for fixed-shape attention (encoder/prefill).
+
+    Tests candidate tile configurations on small random tensors and caches the fastest.
+    Only useful for shapes that repeat (encoder, prefill) — NOT for decode where seq_k changes.
+    """
+    if not torch.cuda.is_available():
+        return
+
+    from layers import _compute_attention_tiles, next_power_of_two
+
+    head_dim_padded = next_power_of_two(head_dim)
+    tag = f"{head_dim_padded}_{seq_q}_{seq_k}_{is_causal}"
+    if tag in _AUTOTUNE_CACHE:
+        return
+
+    # Generate candidate tile configs from the dynamic computation + variations
+    base = _compute_attention_tiles(head_dim, GPU.smem_per_block)
+    candidates = [base]
+
+    # Add smaller/larger variations that fit in shared memory
+    overhead = 8 * 1024
+    usable = max(GPU.smem_per_block - overhead, 16 * 1024)
+    max_budget = usable // (head_dim_padded * 4)
+
+    for bm in (128, 64, 32, 16):
+        for bn in (128, 64, 32, 16):
+            if bm + 2 * bn > max_budget:
+                continue
+            if bm > seq_q:
+                continue
+            for ns in (1, 2):
+                if ns == 2 and GPU.smem_per_block <= 150 * 1024:
+                    continue
+                nw = 8 if bm * bn >= 4096 else 4
+                cfg = (bm, bn, ns, nw)
+                if cfg not in candidates:
+                    candidates.append(cfg)
+
+    # Benchmark each candidate
+    q = torch.randn(num_batch_heads, seq_q, head_dim, device='cuda', dtype=torch.float32)
+    k = torch.randn(num_batch_heads, seq_k, head_dim, device='cuda', dtype=torch.float32)
+    v = torch.randn(num_batch_heads, seq_k, head_dim, device='cuda', dtype=torch.float32)
+    scale = 1.0 / (head_dim ** 0.5)
+
+    best_time = float('inf')
+    best_cfg = base
+
+    for bm, bn, ns, nw in candidates:
+        output = torch.empty_like(q)
+        grid = (triton.cdiv(seq_q, bm), num_batch_heads)
+        try:
+            # Warmup
+            for _ in range(2):
+                flash_attention_kernel[grid](
+                    q, k, v, output, q,  # dummy mask
+                    float(scale), seq_q, seq_k, head_dim,
+                    q.stride(0), q.stride(1), q.stride(2),
+                    k.stride(0), k.stride(1), k.stride(2),
+                    v.stride(0), v.stride(1), v.stride(2),
+                    output.stride(0), output.stride(1), output.stride(2),
+                    0, 0, 0,
+                    IS_CAUSAL=is_causal, HAS_MASK=False,
+                    BLOCK_M=bm, BLOCK_N=bn, BLOCK_D=head_dim_padded,
+                    num_stages=ns, num_warps=nw,
+                )
+            torch.cuda.synchronize()
+
+            # Timed runs
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            for _ in range(n_trials):
+                flash_attention_kernel[grid](
+                    q, k, v, output, q,
+                    float(scale), seq_q, seq_k, head_dim,
+                    q.stride(0), q.stride(1), q.stride(2),
+                    k.stride(0), k.stride(1), k.stride(2),
+                    v.stride(0), v.stride(1), v.stride(2),
+                    output.stride(0), output.stride(1), output.stride(2),
+                    0, 0, 0,
+                    IS_CAUSAL=is_causal, HAS_MASK=False,
+                    BLOCK_M=bm, BLOCK_N=bn, BLOCK_D=head_dim_padded,
+                    num_stages=ns, num_warps=nw,
+                )
+            end.record()
+            torch.cuda.synchronize()
+            elapsed = start.elapsed_time(end) / n_trials
+
+            if elapsed < best_time:
+                best_time = elapsed
+                best_cfg = (bm, bn, ns, nw)
+        except Exception:
+            continue  # Config doesn't work (OOM, invalid config, etc.)
+
+    _AUTOTUNE_CACHE[tag] = best_cfg
 
 
 def get_stream():
@@ -310,24 +393,15 @@ def scaled_dot_product_attention(
             (BH, seq_q, head_dim), dtype=torch.float32, device=q.device
         )
 
-        # Choose tile sizes based on GPU tier and head_dim
+        # Choose tile sizes: autotuned cache (opt-in) > GPU profile (default)
+        # Use warmup_attention_tiles() to pre-tune for known fixed shapes.
+        # Decode shapes (seq_q <= 4) already use SDPA fallback above.
         BLOCK_D = head_dim_padded
-        if _GPU_TIER == 'datacenter':
-            # H200/B200: 228KB shared mem → larger tiles, more pipeline stages
-            if head_dim <= 64:
-                BLOCK_M, BLOCK_N, nstages, nwarps = 128, 128, 2, 8
-            else:
-                BLOCK_M, BLOCK_N, nstages, nwarps = 128, 64, 2, 8
+        attn_tag = f"{head_dim_padded}_{seq_q}_{seq_k}_{is_causal}"
+        if attn_tag in _AUTOTUNE_CACHE:
+            BLOCK_M, BLOCK_N, nstages, nwarps = _AUTOTUNE_CACHE[attn_tag]
         else:
-            # RTX 4090/5090: ~100KB shared mem
-            # Smaller tiles (from meave) give faster prefill compilation
-            if head_dim <= 64:
-                BLOCK_M, BLOCK_N, nstages, nwarps = 64, 64, 1, 4
-            else:
-                BLOCK_M, BLOCK_N, nstages, nwarps = 32, 32, 1, 4
-
-        if seq_q <= 16:
-            BLOCK_M = 16
+            BLOCK_M, BLOCK_N, nstages, nwarps = GPU.get_attention_tiles(head_dim, seq_q)
 
         grid = (triton.cdiv(seq_q, BLOCK_M), BH)
         flash_attention_kernel[grid](

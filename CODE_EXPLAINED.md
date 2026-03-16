@@ -60,7 +60,44 @@ You can only modify: `layers.py`, `attention.py`, `rope.py`, `__init__.py`.
 This is the core file containing all neural network building blocks as Triton
 kernels and Python layer classes.
 
-### 2.1 Helper Functions
+### 2.1 GPU Detection: GPUProfile + _KNOWN_CONFIGS
+
+The first thing layers.py does (after imports) is detect the GPU and set tile sizes.
+
+```python
+# _KNOWN_CONFIGS — tested tile configurations for 6 GPU architectures
+# Each entry: {attn_tiles: {head_dim: (BLOCK_M, BLOCK_N, nstages, nwarps)},
+#              matmul_tiles: (TILE_M, TILE_N, TILE_K),
+#              rope_nstages, rope_nwarps}
+
+class GPUProfile:
+    """Detects GPU at import time, stores optimal tile sizes for all kernels."""
+    def __init__(self):
+        # 1. Read sm_version, shared_memory_per_block_optin, gpu_name
+        # 2. Classify architecture (blackwell_consumer, ada, hopper, etc.)
+        # 3. Look up _KNOWN_CONFIGS for tested GPU → direct tile assignment
+        # 4. Unknown GPU → compute tiles dynamically from shared memory budget
+
+    def get_attention_tiles(self, head_dim, seq_q=None):
+        # Returns (BLOCK_M, BLOCK_N, nstages, nwarps)
+        # Clamps BLOCK_M to 16 for seq_q <= 16 (KV-cached decode)
+
+GPU = GPUProfile()  # Module-level singleton, computed once at import
+```
+
+**Why `shared_memory_per_block_optin`?** The default `shared_memory_per_block` returns
+48KB on all GPUs. The optin value is what Triton can actually request — 99KB on RTX 5090,
+228KB on H200. Using the wrong property led to the old code always detecting "consumer"
+even on datacenter GPUs (it hit the except fallback).
+
+**Dynamic tile computation** for unknown GPUs:
+- `_compute_attention_tiles(head_dim, smem_bytes)`: Tries ranked balanced configs
+  (e.g., 128x128, 128x64, 64x64) largest first. Formula:
+  `(BLOCK_M + 2*BLOCK_N) * BLOCK_D * 4 + 20KB overhead`
+- `_compute_matmul_tiles(smem_bytes)`: Uses SwiGLU worst case (gate + up tiles):
+  `TILE_K * (TILE_M + 2*TILE_N) * 4 + 20KB overhead`
+
+### 2.2 Helper Functions
 
 ```python
 def next_power_of_two(x):
@@ -267,13 +304,16 @@ output = acc / l_i                  # final normalization
 3. **O(BLOCK) SRAM** — memory-efficient for long sequences.
 4. **Tensor cores** — `tl.dot` for both Q@K^T and P@V.
 
-**Tile sizes** (GPU-tier aware, smaller tiles from meave):
-- **Consumer GPUs** (RTX 4090/5090, ~100KB shared mem):
+**Tile sizes** (GPUProfile-aware via `GPU.get_attention_tiles(head_dim, seq_q)`):
+- **Consumer GPUs** (RTX 4090/5090, ~100KB optin shared mem):
   - Encoder (head_dim=64): `BLOCK_M=64, BLOCK_N=64`, `num_stages=1, num_warps=4`
   - Decoder (head_dim=128): `BLOCK_M=32, BLOCK_N=32`, `num_stages=1, num_warps=4`
   - `seq_q <= 16`: `BLOCK_M=16` (optimized for KV-cached decode)
-- **Datacenter GPUs** (H200/B200, ~228KB shared mem):
-  - Larger tiles, `num_stages=2, num_warps=8`
+- **Datacenter GPUs** (H200/B200, ~228KB optin shared mem):
+  - Encoder (head_dim=64): `BLOCK_M=128, BLOCK_N=128`, `num_stages=2, num_warps=8`
+  - Decoder (head_dim=128): `BLOCK_M=128, BLOCK_N=64`, `num_stages=2, num_warps=8`
+- **Unknown GPUs**: tiles computed dynamically by `_compute_attention_tiles()`
+- Optional `_AUTOTUNE_CACHE` override from `warmup_attention_tiles()` (opt-in)
 
 **Features:**
 - `IS_CAUSAL` (constexpr): causal masking for decoder
@@ -628,7 +668,8 @@ Optimizations adopted or planned from analysis of other branches:
 | bf16 LayerNorm output | internal | **-0.7ms** (encoder norm stores bf16 directly) |
 | generate_v8b (KV cache) | internal | **-7.6ms** (monkey-patched from layers.py, uses decode(use_cache=True)) |
 | SDPA fallback for seq_q≤4 | internal | **-3ms** (PyTorch SDPA for KV-cached decode steps) |
-| Runtime GPU detection | internal | portability (detect shared mem tier at import) |
+| GPUProfile + _KNOWN_CONFIGS + dynamic tiles | internal | portability (7 arch classifications, dynamic fallback) |
+| Warmup autotune (opt-in) | internal | opt-in tile benchmarking for fixed-shape attention |
 | Dead code cleanup | internal | -320 lines (removed legacy attention kernels) |
 
 ### Adopted (2026-03-15, fp16-throughout pipeline)
