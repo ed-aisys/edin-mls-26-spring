@@ -115,7 +115,12 @@ class GPUProfile:
             props = torch.cuda.get_device_properties(0)
             # Use optin shared memory (extended) — this is what Triton can actually use.
             # shared_memory_per_block is only 48KB (default), optin is 99-228KB.
-            self.smem_per_block = props.shared_memory_per_block_optin
+            # Fall back to shared_memory_per_block if optin property doesn't exist
+            # (older PyTorch versions).
+            self.smem_per_block = getattr(
+                props, 'shared_memory_per_block_optin',
+                getattr(props, 'max_shared_memory_per_block', props.shared_memory_per_block)
+            )
             self.gpu_name = props.name
         except Exception:
             self._init_cpu_fallback()
