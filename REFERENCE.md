@@ -212,9 +212,9 @@ python benchmark_detailed.py glm_asr_triton_template
 
 ---
 
-## Benchmark Results (RTX 5090, CUDA 13.0, 2026-03-15)
+## Benchmark Results
 
-### Student Benchmark
+### RTX 5090 (CUDA 13.0, 2026-03-15)
 | Implementation | Time | Speed | Accuracy |
 |----------------|------|-------|----------|
 | **Our template (fp16 pipeline + KV cache + SDPA)** | **98.5ms** | 7.58ms/tok | 100% |
@@ -222,6 +222,11 @@ python benchmark_detailed.py glm_asr_triton_template
 | Our template (no KV cache) | 120.7ms | 9.29ms/tok | 100% |
 | Example baseline | 261.3ms | 20.10ms/tok | 100% |
 | **Speedup** | **62.3%** | | |
+
+### H200 MIG 3g.71gb (Teaching Cluster, 60 SMs, 2026-03-16)
+| Implementation | Time | Speed | Accuracy |
+|----------------|------|-------|----------|
+| **Our template (fp16 pipeline + KV cache + SDPA)** | **204.6ms** | 15.74ms/tok | 100% |
 
 ### Detailed Benchmark (50 generated tokens)
 | Component | Time | % Total |
@@ -330,9 +335,20 @@ benchmark_student.py
 - **Expected output:** `CONCORD RETURNED TO ITS PLACE AMIDST THE TENTS`
 - **Duration:** ~3.5 seconds
 
-## Troubleshooting: cuBLAS
+## Troubleshooting
 
+### cuBLAS Version Mismatch
 If you see `CUBLAS_STATUS_INVALID_VALUE`, pip-installed `nvidia-cublas` may conflict:
 ```bash
 pip uninstall nvidia-cublas
+```
+
+### numpy Version Mismatch (cu12)
+If you see `TypeError: expected np.ndarray (got ndarray)`, use `torch.as_tensor()` instead
+of `torch.from_numpy()`. The `_to_torch_tensor()` helper in layers.py handles this automatically.
+
+### Teaching Cluster OOM
+If SLURM kills your job during weight loading, request more RAM:
+```bash
+srun -p Teaching -w saxa --gres gpu:3g.71gb:1 --mem=32G --pty bash
 ```

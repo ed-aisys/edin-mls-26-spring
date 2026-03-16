@@ -285,6 +285,21 @@ def next_power_of_two(x: int) -> int:
     return 1 << (x - 1).bit_length() if x > 0 else 1
 
 
+def _to_torch_tensor(arr, dtype=torch.float32, device='cuda'):
+    """Convert array-like (numpy, CuPy, etc.) to PyTorch tensor on device."""
+    if arr is None:
+        return None
+    if isinstance(arr, torch.Tensor):
+        if arr.dtype != dtype or str(arr.device) != device:
+            return arr.to(dtype=dtype, device=device)
+        return arr
+    if hasattr(arr, 'get'):  # CuPy array
+        arr = np.asarray(arr.get())
+    elif not isinstance(arr, np.ndarray):
+        arr = np.asarray(arr)
+    return torch.as_tensor(arr, dtype=dtype, device=device)
+
+
 # ============================================================================
 # Triton Kernels
 # ============================================================================
@@ -1375,9 +1390,14 @@ def _generate_v8b(
     audio_pad_token_id=59260,
 ):
     """KV-cached O(n) generation using model.decode() with use_cache=True."""
-    # Ensure input_features is a tensor (some benchmarks pass numpy arrays)
-    if not isinstance(input_features, torch.Tensor):
-        input_features = torch.as_tensor(input_features, dtype=torch.float32, device='cuda')
+    # Convert all inputs to PyTorch tensors (benchmarks may pass numpy/CuPy arrays)
+    input_features = _to_torch_tensor(input_features, dtype=torch.float32, device='cuda')
+    if input_features_mask is not None:
+        input_features_mask = _to_torch_tensor(input_features_mask, dtype=torch.float32, device='cuda')
+    if input_ids is not None:
+        input_ids = _to_torch_tensor(input_ids, dtype=torch.int64, device='cuda')
+    if attention_mask is not None:
+        attention_mask = _to_torch_tensor(attention_mask, dtype=torch.float32, device='cuda')
     # Encode audio
     audio_embeds = self.encode_audio(input_features, input_features_mask)
 

@@ -400,10 +400,12 @@ All tile selection across the codebase uses `GPU.*`:
 for compatibility with older PyTorch versions. The default `shared_memory_per_block` returns
 only 48KB, but the optin value is what Triton can actually use (99KB on RTX 5090, 228KB on H200).
 
-**numpy input handling:** `_generate_v8b` converts numpy array inputs to CUDA tensors
-via `torch.as_tensor()`. Uses `as_tensor` instead of `from_numpy()` because some cluster
-environments have numpy version mismatches where `from_numpy()` fails with
-"expected np.ndarray (got ndarray)".
+**Defensive input conversion:** `_generate_v8b` converts all inputs (input_features,
+input_features_mask, input_ids, attention_mask) to PyTorch CUDA tensors via the
+`_to_torch_tensor()` helper. This handles numpy arrays, CuPy arrays (from CuTile benchmarks),
+and generic array-likes. Uses `torch.as_tensor()` instead of `torch.from_numpy()` because
+some cluster environments (e.g., cu12 with mismatched numpy versions) fail with
+`TypeError: expected np.ndarray (got ndarray)`.
 
 A warmup autotune (`warmup_attention_tiles()`) was tested but found worse configs
 in practice (101.6ms vs 98.5ms) and was removed. The 2-tier fallback
@@ -453,6 +455,8 @@ the concatenation-based KV cache from model.py's `TextDecoder.__call__`.
 | `CUDA error: invalid configuration argument` | BLOCK_SIZE too large | Reduce to power of 2, max ~1024 |
 | `triton.CompilationError` | Mismatched tensor shapes | Check mask dimensions match data |
 | `CUBLAS_STATUS_INVALID_VALUE` | cuBLAS version mismatch | `pip uninstall nvidia-cublas` |
+| `expected np.ndarray (got ndarray)` | numpy version mismatch (cu12) | Use `torch.as_tensor()` instead of `torch.from_numpy()` |
+| `Out Of Memory` (SLURM) | Insufficient RAM for weight loading | Use `--mem=32G` in srun/sbatch |
 | `OutOfResources: shared memory` | Fused kernel tiles too large | Reduce tile sizes or disable fusion |
 | Values all zero | Mask not applied correctly | Verify `offs < size` mask |
 | NaN/Inf in output | Missing numerical stability | Subtract max before exp in softmax |
@@ -460,7 +464,7 @@ the concatenation-based KV cache from model.py's `TextDecoder.__call__`.
 
 ---
 
-## 8. Performance Results (RTX 5090, 2026-03-15)
+## 8. Performance Results
 
 | Implementation | Time | Speed | vs Baseline |
 |----------------|------|-------|-------------|
@@ -482,6 +486,16 @@ Key optimizations ranked by impact:
 9. **SDPA fallback for decode** — PyTorch SDPA for seq_q≤4 (-3ms)
 
 **Competition standings:** ankush 98.5ms, meave 127.8ms, yash 128ms, majed 187.9ms.
+
+### Teaching Cluster Results (H200 MIG 3g.71gb, 60 SMs, 2026-03-16)
+
+| Implementation | Time | Speed | Accuracy |
+|----------------|------|-------|----------|
+| **Our template (fp16 pipeline + KV cache + SDPA)** | **204.6ms** | 15.74ms/tok | 100% |
+| Example baseline | ~550ms (est.) | — | 100% |
+
+The H200 MIG slice has only 60 SMs (vs RTX 5090's 170), so times are proportionally slower.
+GPUProfile correctly detects Hopper (sm_90) and uses datacenter tile configs (128×128, nstages=2).
 
 **NOTE:** `benchmark_detailed.py` fails with the fp16 pipeline because the benchmark code
 expects float32 projector output. The student benchmark (authoritative) works perfectly.

@@ -10,7 +10,8 @@ about precision, fusion, tiling, and attention strategies.
 - **yash** — `origin/yash/optimize`, 128ms
 - **majed** — `origin/majed`, 187.9ms
 
-**Benchmark:** RTX 5090, CUDA 13.0, 2026-03-15. All branches produce correct transcription (100% accuracy).
+**Benchmark:** RTX 5090, CUDA 13.0, 2026-03-15. Also tested on H200 MIG 3g.71gb (teaching cluster), 2026-03-16.
+All branches produce correct transcription (100% accuracy).
 
 ---
 
@@ -39,7 +40,7 @@ about precision, fusion, tiling, and attention strategies.
 
 | Branch | Time | vs Baseline | Key Advantage |
 |--------|------|-------------|---------------|
-| **ankush (ours)** | **98.5ms** | **62.3% faster** | fp16-throughout pipeline, KV cache, fused RoPE |
+| **ankush (ours)** | **98.5ms** (RTX 5090) / **204.6ms** (H200 MIG) | **62.3% faster** | fp16-throughout pipeline, KV cache, fused RoPE |
 | meave | 127.8ms | 51.1% faster | fp16 norms, fused RoPE, flash decode kernel |
 | yash | 128ms | 51.0% faster | bf16 everywhere, aggressive tiling for H200 |
 | majed | 187.9ms | 28.1% faster | Conservative but clean, autotune on activations |
@@ -764,10 +765,20 @@ round-trips. But since model.py is read-only, they remain unused.
 5. **Comprehensive flash attention** — handles causal, masked, and plain attention in a single
    kernel with no fallback paths, plus SDPA for tiny decode steps.
 
+### Cross-GPU portability
+
+Our branch is the only one tested and verified on multiple GPU architectures:
+- **RTX 5090** (Blackwell consumer, sm_120, 99KB smem): 98.5ms
+- **H200 MIG 3g.71gb** (Hopper datacenter, sm_90, 228KB smem): 204.6ms
+
+The `_to_torch_tensor()` helper and `torch.as_tensor()` usage ensure compatibility with
+both cu12 and cu130 PyTorch builds, as well as CuPy array inputs from CuTile benchmarks.
+
 ### What we adopted from other branches
 
 - **From meave:** Fused RoPE pair kernel (-14ms), RMSNorm→fp16 kernel (-3ms), smaller flash
-  attention tiles (64×64 encoder, 32×32 decoder), BLOCK_M=16 for seq_q≤16.
+  attention tiles (64×64 encoder, 32×32 decoder), BLOCK_M=16 for seq_q≤16. Also inspired
+  the defensive CuPy input handling (commit 51b363a), which we improved with `torch.as_tensor()`.
 
 - **From yash:** Confirmed that cuBLAS > Triton matmul, bf16 weights are beneficial. Their
   SwiGLU swizzling and aggressive tile sizes didn't help on consumer GPUs.

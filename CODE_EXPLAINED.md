@@ -117,6 +117,21 @@ def pad_to_multiple(size, multiple):
 ```
 Matrix dimensions must be multiples of tile sizes for efficient tiling.
 
+```python
+def _to_torch_tensor(arr, dtype=torch.float32, device='cuda'):
+    """Convert array-like (numpy, CuPy, etc.) to PyTorch tensor on device."""
+```
+Defensive input conversion for `_generate_v8b`. Handles:
+- **PyTorch tensors:** returned as-is (with optional dtype/device move)
+- **CuPy arrays:** detected via `hasattr(arr, 'get')`, converted to numpy first
+- **numpy arrays:** converted via `torch.as_tensor()` (NOT `torch.from_numpy()`)
+- **Other array-likes:** converted via `np.asarray()` first
+
+Uses `torch.as_tensor()` instead of `torch.from_numpy()` because cu12 environments
+with mismatched numpy versions cause `torch.from_numpy()` to fail with
+`TypeError: expected np.ndarray (got ndarray)`. This is a known issue when the pip-installed
+numpy version doesn't match the one bundled with PyTorch's CUDA bindings.
+
 ### 2.2 RMSNorm Kernel
 
 **Purpose:** Normalizes hidden states in the text decoder (before attention and MLP).
@@ -541,12 +556,18 @@ def check_transcription(transcription, expected):
     # Pass if > 80% word overlap
 ```
 
-### Current Benchmark (RTX 5090, 2026-03-15)
+### Current Benchmark
+**RTX 5090 (2026-03-15):**
 - With fp16 pipeline + generate_v8b + SDPA fallback: `98.5ms`, `7.58 ms/token`
 - With bf16 pipeline + generate_v8b + SDPA fallback: `110.0ms (+/- 0.2ms)`, `8.46 ms/token`
 - Without generate_v8b: `120.7ms (+/- 0.2ms)`, `9.29 ms/token`
 - 13 tokens generated, `100.0%` transcription accuracy
 - **Competition:** ankush 98.5ms, meave 127.8ms, yash 128ms, majed 187.9ms
+
+**H200 MIG 3g.71gb Teaching Cluster (2026-03-16):**
+- With fp16 pipeline + generate_v8b + SDPA fallback: `204.6ms (+/- 1.7ms)`, `15.74 ms/token`
+- 60 SMs (vs RTX 5090's 170), so proportionally slower
+- GPUProfile correctly detected Hopper (sm_90), used datacenter tile configs
 
 **NOTE:** `benchmark_detailed.py` fails with fp16 pipeline (expects float32 projector output).
 Student benchmark (authoritative) works perfectly.

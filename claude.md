@@ -415,6 +415,39 @@ When `arch_name` is not in `_KNOWN_CONFIGS`, tiles are computed from shared memo
 - Known configs match hand-tuned values exactly
 - Dynamic computation produces good-enough configs for untested GPUs
 
+### Step 13: Defensive Input Conversion + Teaching Cluster Benchmark (Session 13, 2026-03-16)
+
+#### 13.1 Teaching Cluster Setup (Edinburgh)
+- **Cluster:** Edinburgh teaching cluster (`mlp.inf.ed.ac.uk`)
+- **GPU:** NVIDIA H200 in MIG mode (not full GPU)
+  - `1g.18gb` slice: 16 SMs, 16GB VRAM → 309.7ms
+  - `3g.71gb` slice: 60 SMs, 70GB VRAM → **204.6ms**
+- **Software:** conda env `mls`, PyTorch 2.10.0+cu130, Triton 3.6.0
+- **SLURM:** `srun -p Teaching -w saxa --gres gpu:3g.71gb:1 --mem=32G`
+- GPUProfile correctly detected Hopper (sm_90) and used datacenter tile configs
+
+#### 13.2 Defensive Input Conversion (`_to_torch_tensor` helper)
+- Added `_to_torch_tensor(arr, dtype, device)` helper function in layers.py
+- Handles: PyTorch tensors (passthrough), numpy arrays, CuPy arrays, generic array-likes
+- Uses `torch.as_tensor()` instead of `torch.from_numpy()` to avoid numpy version mismatch
+- Applied to ALL inputs in `_generate_v8b`: `input_features`, `input_features_mask`, `input_ids`, `attention_mask`
+- Fixes `TypeError: expected np.ndarray (got ndarray)` on cu12 environments
+- Fixes CuPy array inputs from the CuTile benchmark path
+- **Zero performance impact** — runs once before inference, not in hot loop
+
+#### 13.3 Fixes from ankush-branch-with-meave-edits (Meave's commit 51b363a)
+- Meave's commit added similar CuPy handling but still used `torch.from_numpy()` (broken on cu12)
+- Also added CuPy return conversion for CuTile benchmark compatibility
+- Our implementation uses `torch.as_tensor()` throughout (fixes the cu12 issue Meave's didn't)
+
+#### 13.4 Teaching Cluster Benchmark Results (H200 MIG 3g.71gb)
+| Metric | H200 MIG 3g.71gb (60 SMs) | RTX 5090 (170 SMs) |
+|--------|---------------------------|---------------------|
+| Time | **204.6ms** (+/- 1.7ms) | **98.5ms** (+/- 0.2ms) |
+| Speed | 15.74 ms/tok | 7.58 ms/tok |
+| Accuracy | 100% | 100% |
+| Status | PASS | PASS |
+
 ---
 
 ## Optimization Roadmap
