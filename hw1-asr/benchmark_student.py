@@ -17,8 +17,45 @@ import os
 import numpy as np
 import importlib
 
-# Expected transcription for the test audio
-EXPECTED_TEXT = "CONCORD RETURNED TO ITS PLACE AMIDST THE TENTS"
+
+def load_expected_text(audio_path):
+    """
+    Load expected transcription from a corresponding .txt file.
+    Looks for a text file with the same name as the audio file (without extension).
+    Extracts text after 'Expected transcription:' line.
+
+    Args:
+        audio_path: Path to the audio file (e.g., 'test_audio.wav')
+
+    Returns:
+        Expected transcription text, or None if file not found
+    """
+    if not audio_path:
+        return None
+
+    # Remove .wav, .flac, etc. extension and add .txt
+    base_path = os.path.splitext(audio_path)[0]
+    txt_path = base_path + '.txt'
+
+    if not os.path.exists(txt_path):
+        return None
+
+    try:
+        with open(txt_path, 'r') as f:
+            content = f.read()
+
+        # Find the "Expected transcription:" line
+        if 'Expected transcription:' in content:
+            # Get everything after "Expected transcription:"
+            parts = content.split('Expected transcription:', 1)
+            if len(parts) > 1:
+                expected_text = parts[1].strip().split('\n')[0].strip()
+                return expected_text
+    except Exception as e:
+        print(f"Warning: Could not read expected text from {txt_path}: {e}")
+
+    return None
+
 
 def download_librispeech_sample():
     """Download a LibriSpeech sample audio file."""
@@ -92,11 +129,13 @@ def load_test_audio(audio_path=None):
 
     audio_array = None
     sr = 16000
+    used_audio_path = None
 
     for path in audio_paths:
         if os.path.exists(path):
             try:
                 audio_array, sr = read_wav(path)
+                used_audio_path = path
                 print(f"Loaded audio from {path}")
                 break
             except Exception as e:
@@ -109,6 +148,15 @@ def load_test_audio(audio_path=None):
         t = np.linspace(0, duration, int(sr * duration), dtype=np.float32)
         audio_array = 0.5 * np.sin(2 * np.pi * 440 * t)
         return audio_array.astype(np.float32), "[synthetic]", duration
+
+    # Try to load expected text from corresponding .txt file
+    expected_text = None
+    if used_audio_path:
+        expected_text = load_expected_text(used_audio_path)
+
+    # Fallback to default if not found
+    if expected_text is None:
+        expected_text = "CONCORD RETURNED TO ITS PLACE AMIDST THE TENTS"
 
     # Resample to 16kHz if needed
     target_sr = 16000
@@ -125,7 +173,7 @@ def load_test_audio(audio_path=None):
             audio_array = np.interp(new_indices, old_indices, audio_array)
 
     duration = len(audio_array) / target_sr
-    return audio_array.astype(np.float32), EXPECTED_TEXT, duration
+    return audio_array.astype(np.float32), expected_text, duration
 
 
 def benchmark_cutile_folder(folder_name, audio_array, num_warmup=1, num_runs=3):
