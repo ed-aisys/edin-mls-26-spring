@@ -1,719 +1,541 @@
 # Design Choices: GLM-ASR Triton GPU Kernel Optimization
 
-This document explains every significant design choice made during the optimization of the GLM-ASR speech recognition model. It is written for technical readers who may have little or no GPU programming experience. Every GPU concept is explained when it first appears.
+Implementation-focused reference for the GLM-ASR speech recognition model optimization. Covers what was chosen, why (with benchmark data), and how it maps to code.
+
+**Result: 261.3ms baseline to 98.5ms (2.65x speedup) on RTX 5090, 100% accuracy.**
 
 ---
 
 ## Table of Contents
 
-1. [Background: What Are We Optimizing?](#1-background-what-are-we-optimizing)
-2. [Tile Sizes and Block Dimensions](#2-tile-sizes-and-block-dimensions)
-3. [Shared Memory: The Fundamental Constraint](#3-shared-memory-the-fundamental-constraint)
-4. [num_warps: How Many Threads Per Block](#4-num_warps-how-many-threads-per-block)
-5. [num_stages: Pipeline Depth (Double-Buffering)](#5-num_stages-pipeline-depth-double-buffering)
-6. [Flash Attention vs. Multi-Kernel Attention](#6-flash-attention-vs-multi-kernel-attention)
-7. [cuBLAS vs. Custom Triton Matmul](#7-cublas-vs-custom-triton-matmul)
-8. [fp16 vs bf16 vs fp32: Data Type Selection](#8-fp16-vs-bf16-vs-fp32-data-type-selection)
-9. [KV Cache and the generate_v8b Function](#9-kv-cache-and-the-generate_v8b-function)
-10. [Kernel Fusion: SwiGLU and LinearGELU](#10-kernel-fusion-swiglu-and-lineargelu)
-11. [GPUProfile: Portable GPU Detection](#11-gpuprofile-portable-gpu-detection)
-12. [Autotune: Built, Tested, Removed](#12-autotune-built-tested-removed)
-13. [Rejected Optimizations](#13-rejected-optimizations)
-14. [Monkey-Patching: Why and How](#14-monkey-patching-why-and-how)
-15. [Dead Code Removal](#15-dead-code-removal)
-16. [Summary of Performance Impact](#16-summary-of-performance-impact)
+1. [Tile Sizes and `_KNOWN_CONFIGS`](#1-tile-sizes-and-_known_configs)
+2. [Shared Memory Budget and Dynamic Tile Selection](#2-shared-memory-budget-and-dynamic-tile-selection)
+3. [Flash Attention Kernel](#3-flash-attention-kernel)
+4. [cuBLAS vs. Triton Matmul](#4-cublas-vs-triton-matmul)
+5. [fp16 Pipeline](#5-fp16-pipeline)
+6. [KV Cache via Monkey-Patching](#6-kv-cache-via-monkey-patching)
+7. [Fused Kernels: SwiGLU and LinearGELU](#7-fused-kernels-swiglu-and-lineargelu)
+8. [GPUProfile: Architecture Detection](#8-gpuprofile-architecture-detection)
+9. [Rejected Optimizations](#9-rejected-optimizations)
+10. [Performance Summary](#10-performance-summary)
+11. [H200 Ablation Testing](#11-h200-ablation-testing)
 
 ---
 
-## 1. Background: What Are We Optimizing?
+## 1. Tile Sizes and `_KNOWN_CONFIGS`
 
-GLM-ASR is a speech recognition model that converts audio into text. It has three main stages:
+Tile sizes are stored in `_KNOWN_CONFIGS` (`layers.py:23-86`), a dict mapping architecture name to tested tile configurations:
 
-1. **Audio Encoder** — Processes the audio waveform through 32 transformer layers, each containing attention and feed-forward (MLP) sub-layers.
-2. **Multi-modal Projector** — A small linear layer that converts audio features into the text decoder's format.
-3. **Text Decoder** — Generates text tokens one at a time through 28 transformer layers, each with attention and MLP sub-layers.
-
-The baseline implementation runs in **262ms** on an RTX 5090. Our optimized version runs in **100.4ms** — a **2.6x speedup**.
-
-Every optimization in this document targets one of three physical bottlenecks:
-- **Memory bandwidth** — How fast data moves between GPU memory (VRAM) and the compute units. Most of our operations are "bandwidth-bound," meaning the GPU spends more time waiting for data than actually computing.
-- **Compute throughput** — How many arithmetic operations the GPU can perform per second.
-- **Kernel launch overhead** — Each time the CPU tells the GPU to run a function ("launches a kernel"), there is a small fixed cost (~5-15 microseconds). With hundreds of kernel launches per inference, this adds up.
-
----
-
-## 2. Tile Sizes and Block Dimensions
-
-### What is a "tile"?
-
-GPUs process data in parallel, but they cannot process an entire matrix at once. Instead, they break large matrices into smaller rectangular chunks called **tiles** (also called **blocks**). Each tile is processed by a group of GPU threads working together.
-
-For example, if you have a 1024×1024 matrix and you use 64×64 tiles, the GPU launches 256 thread groups (16×16 grid of tiles), each processing one 64×64 chunk.
-
-### Why tile size matters
-
-Tile size is the single most important tuning parameter for GPU kernels. It affects:
-
-- **Parallelism** — Larger tiles mean fewer thread groups, which can under-utilize the GPU if there aren't enough tiles to keep all compute units busy. Smaller tiles create more thread groups but each does less work.
-- **Shared memory usage** — Larger tiles require more shared memory (see [Section 3](#3-shared-memory-the-fundamental-constraint)). If a tile is too large, it won't fit, and the kernel will crash.
-- **Memory efficiency** — Larger tiles amortize the overhead of loading data from slow GPU main memory (VRAM). Loading a 128×128 tile is only slightly slower than loading a 64×64 tile due to how memory controllers work, but you get 4x more data to compute on.
-
-### Our tile size choices
-
-We use different tile sizes for different operations and GPU architectures:
-
-#### Flash Attention tiles (BLOCK_M × BLOCK_N)
-
-| GPU | Shared Memory | Encoder (head_dim=64) | Decoder (head_dim=128) |
-|-----|--------------|----------------------|----------------------|
-| RTX 5090 | ~99KB | 64×64 | 32×32 |
-| RTX 4090 | ~100KB | 64×64 | 32×32 |
-| RTX 3090 | ~100KB | 64×64 | 32×32 |
-| H100/H200 | ~228KB | 128×128 | 128×64 |
-| A100 | ~164KB | 128×64 | 64×32 |
-| B200 | ~228KB | 128×128 | 128×64 |
-
-The decoder uses smaller tiles than the encoder because head_dim=128 means each element in the tile is larger (128 floats per row instead of 64), consuming twice the shared memory per row.
-
-#### Matmul tiles (TILE_M × TILE_N × TILE_K)
-
-| GPU | Shared Memory | Tile Size |
-|-----|--------------|-----------|
-| RTX 5090 / 4090 / 3090 | ~99-100KB | 64×64×32 |
-| H100 / H200 / B200 | ~228KB | 128×128×64 |
-| A100 | ~164KB | 128×64×32 |
-
-Here, TILE_K is the "inner" dimension — how many elements we accumulate before writing partial results. A larger TILE_K means fewer iterations of the inner loop, which reduces overhead.
-
-### How we chose these values
-
-We tested configurations manually on the RTX 5090 and stored the results in a lookup table called `_KNOWN_CONFIGS`. We also built an autotune system that tried every valid configuration at runtime — but the hand-tuned configs consistently won (see [Section 12](#12-autotune-built-tested-removed)).
-
-For unknown GPUs, we compute tile sizes dynamically by trying configurations from largest to smallest and picking the biggest one that fits in shared memory (see `_compute_attention_tiles()` and `_compute_matmul_tiles()` in `layers.py`).
-
----
-
-## 3. Shared Memory: The Fundamental Constraint
-
-### What is shared memory?
-
-Every GPU has a memory hierarchy, similar to how a computer has fast L1/L2 cache and slower RAM:
-
-```
-Registers         (fastest, ~1 cycle,  per-thread,    ~256KB total per SM)
-   ↓
-Shared Memory     (fast,    ~5 cycles, per-block,     48-228KB per SM)
-   ↓
-L2 Cache          (~100 cycles, shared across all SMs, 6-60MB)
-   ↓
-VRAM / HBM        (slow,   ~300 cycles, global,       16-80GB)
+```python
+_KNOWN_CONFIGS = {
+    "blackwell_consumer": {  # RTX 5090 (sm_120, ~99KB smem)
+        "attn_tiles": {
+            64:  (64, 64, 1, 4),   # (BLOCK_M, BLOCK_N, nstages, nwarps)
+            128: (32, 32, 1, 4),
+        },
+        "matmul_tiles": (64, 64, 32),  # (TILE_M, TILE_N, TILE_K)
+        "rope_nstages": 1,
+        "rope_nwarps": 4,
+    },
+    "hopper": {  # H100/H200 (sm_90, ~228KB smem)
+        "attn_tiles": {
+            64:  (128, 128, 2, 8),
+            128: (128, 64, 2, 8),
+        },
+        "matmul_tiles": (128, 128, 64),
+        "rope_nstages": 2,
+        "rope_nwarps": 8,
+    },
+    # ... ada, blackwell_dc, ampere_dc, ampere_consumer
+}
 ```
 
-**Shared memory** (also called SRAM or scratchpad) is a fast, programmer-controlled memory region shared by all threads in a block. When we load a tile from VRAM into shared memory, every thread in the block can read it at ~50x lower latency than re-reading from VRAM.
+**Attention tiles** are keyed by `head_dim` (64 for encoder, 128 for decoder). The decoder uses smaller tiles because head_dim=128 doubles per-row shared memory consumption. `GPUProfile.get_attention_tiles()` (`layers.py:188`) also clamps `BLOCK_M` to 16 when `seq_q <= 16` for KV-cached decode steps.
 
-### The 48KB vs optin problem
+**Matmul tiles** are used by `Linear`, `MLP`, and `EncoderMLP` classes. Set once at class definition time:
+```python
+class MLP:
+    TILE_M, TILE_N, TILE_K = GPU.matmul_tile_m, GPU.matmul_tile_n, GPU.matmul_tile_k
+```
 
-Every NVIDIA GPU since Volta (2017) advertises a **default** shared memory limit of **48KB per block**. But modern GPUs actually have much more — they just need you to explicitly "opt in" to the extended limit:
+### Development history: tile sizes tried
 
-| GPU | Default (shared_memory_per_block) | Optin (shared_memory_per_block_optin) |
-|-----|----------------------------------|--------------------------------------|
-| RTX 3090 | 48KB | ~100KB |
-| RTX 4090 | 48KB | ~100KB |
-| RTX 5090 | 48KB | ~99KB |
-| A100 | 48KB | ~164KB |
-| H100/H200 | 48KB | ~228KB |
+The tile configuration evolved through 7 commits by 3 contributors:
 
-If you use the default 48KB, you can only fit tiny tiles (e.g. 16×16), which makes kernels extremely slow. Triton automatically opts in to the extended limit, but we need to **read the correct property** to know how much we have.
+| Commit | Author | Matmul Tiles | Activation BLOCK_SIZE | Benchmark | Key Change |
+|--------|--------|-------------|----------------------|-----------|------------|
+| `12daf13` | Ankush | 64×64×32 | dynamic `next_power_of_two(hidden_size)` | ~261ms (baseline) | Initial implementation of all 10 kernels |
+| `893eb35` | Majed | 64×64×32 | `@triton.autotune` over {128, 256, 512, 1024} | **+0.7ms** overhead | Added autotune to RMSNorm, LayerNorm, GELU, SiLU |
+| `7f93bfd` | Yash | **128×64×32** | — | SwiGLU **196→83ms** | Tuned tiles for register pressure; fused MLP ops (cuTile branch) |
+| `5d5bc8a` | Yash | **128×128×32** | kept autotune | **+18ms** regression | Added grid swizzling (`GROUP_SIZE_M=8`), bf16 weights |
+| `bdc7690` | Ankush | **128×128×64** | kept autotune | **214ms** (18% faster) | Switched to cuBLAS backend. TILE_K 32→64 |
+| `5e8b191` | Ankush | 128×128×64 | hardcoded **1024** | bundled with docs | Removed autotune, fixed BLOCK_SIZE=1024 for all element-wise kernels |
+| `e496204` | Ankush | per-GPU via `GPUProfile` | 1024 | part of 110ms result | Introduced `_KNOWN_CONFIGS` + dynamic tile computation |
+| `8611863` | Ankush | per-GPU | 1024 | autotune was **101.6 vs 98.5ms** (+3.1ms) | Removed warmup autotune (~110 lines) after it found worse configs |
 
-### The getattr fallback chain
+**Majed's `@triton.autotune` (`893eb35`)** added 4-config search on element-wise kernels:
+```python
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE': 128}, num_warps=4),
+        triton.Config({'BLOCK_SIZE': 256}, num_warps=4),
+        triton.Config({'BLOCK_SIZE': 512}, num_warps=8),
+        triton.Config({'BLOCK_SIZE': 1024}, num_warps=8),
+    ],
+    key=['hidden_size'],
+)
+```
+This was applied to `rmsnorm_kernel`, `layernorm_kernel`, `gelu_kernel`, and `silu_kernel`. The tuning warmup added +0.7ms overhead that exceeded any possible gain for these simple pointwise operations. Removed in `5e8b191`.
 
-Different versions of PyTorch expose the optin limit under different property names. We use a fallback chain to handle all versions:
+**Yash's swizzling (`5d5bc8a`)** added `GROUP_SIZE_M` to the fused SwiGLU kernel for L2 cache-friendly tile ordering:
+```python
+# Grid swizzling logic added to swiglu_fused_kernel
+num_pid_m = tl.cdiv(M, BLOCK_M)
+num_pid_n = tl.cdiv(N, BLOCK_N)
+num_pid_in_group = GROUP_SIZE_M * num_pid_n
+group_id = pid // num_pid_in_group
+first_pid_m = group_id * GROUP_SIZE_M
+group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+```
+With `GROUP_SIZE_M=8`, `num_warps=8`, `num_stages=4`, and a 1D grid. This regressed by +18ms on RTX 5090 — the 72MB L2 cache already provides good locality without explicit reordering. Reverted.
+
+**Warmup autotune (built then removed):** We also built a `warmup_attention_tiles()` function (~95 lines) that benchmarked all valid attention tile configs at runtime using synthetic data. It selected `BLOCK_M=16` as optimal in micro-benchmarks, but the full-pipeline benchmark showed 101.6ms vs 98.5ms for hand-tuned 64×64 — a 3.1ms regression. Synthetic micro-benchmarks don't capture inter-kernel cache interactions. The entire autotune system was removed in `8611863`.
+
+---
+
+## 2. Shared Memory Budget and Dynamic Tile Selection
+
+### The optin property problem
+
+`torch.cuda.get_device_properties().shared_memory_per_block` returns 48KB on all GPUs (the default limit). The actual usable amount requires reading the optin property. `GPUProfile.__init__()` (`layers.py:120-123`) uses a `getattr` fallback chain:
 
 ```python
 self.smem_per_block = getattr(
     props, 'shared_memory_per_block_optin',         # PyTorch 2.8+
-    getattr(props, 'max_shared_memory_per_block',   # some PyTorch builds
-            props.shared_memory_per_block)           # fallback (48KB default)
+    getattr(props, 'max_shared_memory_per_block',   # some builds
+            props.shared_memory_per_block)           # fallback (48KB)
 )
 ```
 
-This was discovered the hard way: on the university's H200 cluster, an older PyTorch version didn't have `shared_memory_per_block_optin`, so our code fell back to 48KB and chose tiny tile sizes, running 2x slower than expected.
+Without this, H200s running older PyTorch silently fell back to 48KB and selected consumer-sized tiles (64x64 instead of 128x128), running 2x slower.
 
-### The shared memory formula
+### Dynamic tile computation
 
-For flash attention, the shared memory needed per tile configuration is:
+For unknown GPUs, `_compute_attention_tiles()` (`layers.py:206-235`) iterates ranked configs largest-first and picks the biggest that fits:
 
-```
-bytes = (BLOCK_M + 2 × BLOCK_N) × BLOCK_D × 4 + ~20KB overhead
-```
-
-Where:
-- **BLOCK_M** — Number of query rows per tile
-- **BLOCK_N** — Number of key/value rows per tile (×2 because we load both K and V)
-- **BLOCK_D** — Head dimension (64 or 128), padded to the next power of 2
-- **4** — Bytes per fp32 element (tiles are computed in fp32 for numerical precision)
-- **~20KB** — Triton compiler overhead (accumulators, softmax running state, padding, etc.)
-
-Example for RTX 5090 with head_dim=64:
-```
-(64 + 2×64) × 64 × 4 + 20480 = 49,152 + 20,480 = 69,632 bytes (~68KB)
-```
-This fits in ~99KB. But 128×128 tiles would need:
-```
-(128 + 2×128) × 64 × 4 + 20480 = 98,304 + 20,480 = 118,784 bytes (~116KB)
-```
-That exceeds ~99KB — so RTX 5090 cannot use 128×128 tiles.
-
-For the fused SwiGLU matmul kernel, the formula is different because we load three matrices (input A, gate weight, up weight):
-
-```
-bytes = TILE_K × (TILE_M + 2 × TILE_N) × 4 + ~20KB overhead
-```
-
----
-
-## 4. num_warps: How Many Threads Per Block
-
-### What is a warp?
-
-A **warp** is a group of 32 GPU threads that execute the same instruction simultaneously (in lockstep). It is the smallest scheduling unit on NVIDIA GPUs. You cannot run fewer than 32 threads in a warp.
-
-A **block** (also called a thread block or CTA) is a larger group of warps that share the same shared memory. When we say `num_warps=4`, we mean each block has 4 × 32 = 128 threads. With `num_warps=8`, each block has 256 threads.
-
-### Why num_warps matters
-
-- **More warps per block** means more threads working on the same tile, which can hide memory latency (when some warps are waiting for data, others can compute). Good for large tiles.
-- **Fewer warps per block** means each warp gets a larger share of the shared memory and registers. Good for small tiles where there isn't enough work to keep many warps busy.
-
-### Our choices
-
-We use a simple rule:
 ```python
-nwarps = 8 if (BLOCK_M × BLOCK_N) >= 4096 else 4
+# Shared memory formula for flash attention:
+needed = (BLOCK_M + 2 * BLOCK_N) * BLOCK_D * 4 + 20 * 1024  # overhead
+
+# Example: RTX 5090, head_dim=64
+# (64 + 2*64) * 64 * 4 + 20480 = 69,632 bytes (~68KB) -- fits in 99KB
+# (128 + 2*128) * 64 * 4 + 20480 = 118,784 bytes (~116KB) -- exceeds 99KB
 ```
 
-- **Large tiles** (128×128 = 16,384 elements, or 128×64 = 8,192 elements): `num_warps=8` (256 threads). Enough work to keep 8 warps busy.
-- **Small tiles** (64×64 = 4,096 elements): `num_warps=4` (128 threads). Borderline — 4 warps is sufficient.
-- **Tiny tiles** (32×32 = 1,024 elements, or smaller): `num_warps=4`. Only 1,024 elements to process, so 128 threads is plenty.
-
-We tested `num_warps=8` on the RTX 5090 with 64×64 tiles and saw no improvement — the tile is too small to benefit from the extra parallelism.
-
----
-
-## 5. num_stages: Pipeline Depth (Double-Buffering)
-
-### What is double-buffering?
-
-When a GPU kernel processes tiles, it typically does two things in a loop:
-1. **Load** the next tile from slow VRAM into fast shared memory
-2. **Compute** on the current tile in shared memory
-
-With `num_stages=1` (no pipelining), these happen sequentially:
-```
-Load tile 1 → Compute tile 1 → Load tile 2 → Compute tile 2 → ...
+`_compute_matmul_tiles()` (`layers.py:238-258`) uses the SwiGLU worst case (loading A + gate_w + up_w):
+```python
+needed = TILE_K * (TILE_M + 2 * TILE_N) * 4 + 20 * 1024
 ```
 
-With `num_stages=2` (double-buffering), the GPU overlaps loading and computing:
-```
-Load tile 1 → Load tile 2 + Compute tile 1 → Load tile 3 + Compute tile 2 → ...
-```
-
-This means the GPU is never idle — while it's computing on one tile, it's simultaneously loading the next. On memory-bandwidth-bound operations, this can improve performance by up to 2x.
-
-### The catch: double the shared memory
-
-Double-buffering requires holding **two tiles** in shared memory simultaneously (the one being computed on and the one being loaded). This doubles the shared memory requirement.
-
-### Our choices
-
-| GPU | Shared Memory | num_stages | Why |
-|-----|--------------|------------|-----|
-| RTX 5090 / 4090 / 3090 | ~99-100KB | **1** | Cannot fit two tiles. A single 64×64 tile with head_dim=64 needs ~68KB. Two would need ~136KB. |
-| H100 / H200 / B200 | ~228KB | **2** | Plenty of room. A single 128×128 tile needs ~116KB. Two need ~232KB, which just fits in 228KB (the overhead is shared, not doubled). |
-| A100 | ~164KB | **1** | With 128×64 tiles, one tile needs ~96KB. Two would need ~172KB, which barely fits — but we keep it at 1 for reliability. |
-
-The threshold in our code:
+`nstages` and `nwarps` are derived from tile area:
 ```python
 nstages = 2 if smem_bytes > 150 * 1024 else 1
+nwarps = 8 if bm * bn >= 4096 else 4
 ```
-
-We explicitly tested `num_stages=2` on the RTX 5090 and it caused **out-of-memory errors** on the shared memory level (the kernel refused to launch). This is not a VRAM issue — it's shared memory per block being too small.
 
 ---
 
-## 6. Flash Attention vs. Multi-Kernel Attention
+## 3. Flash Attention Kernel
 
-### The problem with standard attention
+### Implementation
 
-Standard multi-head attention computes:
-```
-Attention(Q, K, V) = softmax(Q × K^T / √d) × V
-```
-
-A naive implementation launches **three separate kernels**:
-1. Compute scores: `S = Q × K^T × scale`
-2. Apply softmax: `P = softmax(S)`
-3. Compute output: `O = P × V`
-
-Each kernel reads from and writes to VRAM. The intermediate matrices S and P are large (seq_q × seq_k per head) and exist only to be immediately consumed by the next kernel. This "materialization" of intermediates wastes memory bandwidth.
-
-### Flash Attention: one kernel, no intermediates
-
-Flash attention fuses all three steps into a **single kernel** using a technique called **online softmax**. The key insight is that softmax can be computed incrementally — you don't need to see all the scores at once.
-
-The algorithm processes K/V in tiles and maintains running statistics (max value and sum of exponentials) that get corrected as new tiles arrive. The Q, K, V tiles are loaded into shared memory, the score and softmax are computed in registers (fastest memory), and only the final output O is written back to VRAM.
-
-Benefits:
-- **No intermediate matrices** — S and P never exist in VRAM, saving O(seq_q × seq_k) memory
-- **One kernel launch** instead of three — saves ~15-30μs of launch overhead
-- **Better memory access patterns** — each tile of Q, K, V is loaded once from VRAM, reused many times in shared memory
-
-### Our implementation
-
-We replaced the original 3-kernel pipeline with a single `flash_attention_kernel` in `attention.py`. The old kernels (`attention_scores`, `softmax_inplace`, `attention_output`, `causal_mask`) were deleted — about 200 lines of dead code removed.
-
-### SDPA fallback for tiny sequences
-
-During KV-cached decode, the query sequence length is 1 (single token). Launching our custom flash attention kernel for a single row has high overhead relative to the tiny amount of work. For these cases (`seq_q ≤ 4`), we fall back to PyTorch's built-in `scaled_dot_product_attention` (SDPA), which is optimized for this exact scenario:
+`flash_attention_kernel` (`attention.py:34-157`) replaces the original 3-kernel pipeline (~200 lines of `attention_scores_kernel`, `softmax_inplace_kernel`, `attention_output_kernel`, `causal_mask_kernel`). Signature:
 
 ```python
-if seq_q <= 4:
-    return F.scaled_dot_product_attention(q, k, v, attn_mask=mask, is_causal=is_causal)
+@triton.jit
+def flash_attention_kernel(
+    q_ptr, k_ptr, v_ptr, o_ptr, mask_ptr, scale,
+    seq_q, seq_k, head_dim: tl.constexpr,
+    # ... stride parameters ...
+    IS_CAUSAL: tl.constexpr,
+    HAS_MASK: tl.constexpr,
+    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_D: tl.constexpr,
+):
 ```
 
----
+Grid: `(cdiv(seq_q, BLOCK_M), batch * num_heads)`. Processes Q in tiles of BLOCK_M rows, iterating K/V in BLOCK_N chunks with online softmax (running `m_i`, `l_i`, `acc` state vectors).
 
-## 7. cuBLAS vs. Custom Triton Matmul
-
-### What is cuBLAS?
-
-cuBLAS is NVIDIA's official library for matrix multiplication (and other linear algebra operations). It is hand-tuned by NVIDIA engineers for every GPU architecture, using assembly-level optimizations that are impossible to replicate in Triton.
-
-### Why we use cuBLAS for Linear layers
-
-We wrote a custom Triton matmul kernel and benchmarked it against cuBLAS (`F.linear()`). cuBLAS was consistently faster for the matrix sizes in our model:
-
-- Encoder linear layers: 1280×1280, 1280×5120 matrices
-- Decoder linear layers: 2048×2048, 2048×5632 matrices
-
-These are large, regular matrices — exactly what cuBLAS is optimized for. Our Triton kernel's advantage is **flexibility** (custom fusions), not raw matmul speed.
-
-### Where we DO use Triton matmul
-
-We use custom Triton kernels for **fused operations** where cuBLAS cannot help:
-
-- **Fused SwiGLU**: `SiLU(x @ gate_weight) * (x @ up_weight)` — one kernel instead of two matmuls + two activations + one elementwise multiply
-- **Fused LinearGELU**: `GELU(x @ weight + bias)` — one kernel instead of matmul + bias add + activation
-
-cuBLAS can only do `x @ weight`. Everything after that (activation functions, elementwise ops) requires separate kernel launches. Fusion eliminates those extra launches and avoids writing/reading intermediate results to/from VRAM.
-
-### The backend selection
-
+Key online softmax loop (`attention.py:94-145`):
 ```python
-Linear.BACKEND = "torch"  # Use cuBLAS via F.linear()
+for start_n in range(0, kv_len, BLOCK_N):
+    s = tl.dot(q, tl.trans(k))          # Q @ K^T in SRAM
+    m_new = tl.maximum(m_i, tl.max(s, axis=1))
+    alpha = tl.exp(m_i - m_new)          # rescale factor
+    p = tl.exp(s - m_new[:, None])       # attention weights
+    l_i = alpha * l_i + tl.sum(p, axis=1)
+    acc = alpha[:, None] * acc + tl.dot(p, v)  # P @ V in SRAM
 ```
 
-We also support `BACKEND = "triton"` for our custom kernel, but it is ~5ms slower for the standard linear layers in this model.
+`IS_CAUSAL` and `HAS_MASK` are `tl.constexpr` -- Triton compiles separate kernels with dead branches eliminated. For causal, K/V iteration is bounded: `kv_len = tl.minimum(seq_k, (pid_m + 1) * BLOCK_M)`.
 
----
+### SDPA fallback
 
-## 8. fp16 vs bf16 vs fp32: Data Type Selection
-
-### What are these formats?
-
-| Format | Bits | Exponent | Mantissa | Range | Precision |
-|--------|------|----------|----------|-------|-----------|
-| fp32 | 32 | 8 bits | 23 bits | ±3.4×10³⁸ | ~7 decimal digits |
-| fp16 | 16 | 5 bits | 10 bits | ±65,504 | ~3.3 decimal digits |
-| bf16 | 16 | 8 bits | 7 bits | ±3.4×10³⁸ | ~2.4 decimal digits |
-
-- **fp32** is standard full precision. Highest quality, but uses 4 bytes per number and is slowest.
-- **fp16** (half precision) uses 2 bytes per number — halving memory bandwidth requirements. Limited range (max 65,504) but sufficient for inference.
-- **bf16** (brain float 16) also uses 2 bytes but trades precision for range. Same exponent range as fp32, but only ~2.4 digits of precision.
-
-### Why fp16 over bf16?
-
-On the RTX 5090, we benchmarked both:
-- **fp16 pipeline: 98.5ms**
-- **bf16 pipeline: 102.1ms**
-
-fp16 is ~3.6ms faster because:
-1. cuBLAS HGEMM (fp16 matrix multiply) is slightly faster than its bf16 equivalent on RTX 5090's tensor cores
-2. The extra precision of fp16 (10 vs 7 mantissa bits) didn't cause any accuracy issues for inference
-
-### The fp16-throughout pipeline
-
-Our biggest optimization was eliminating **unnecessary type conversions**. The original code had many places where data was converted between types:
-
-```
-fp16 input → fp32 (for compute) → fp16 (store to VRAM) → fp32 (next layer loads) → ...
-```
-
-Each conversion wastes bandwidth. We rewired the entire pipeline so data stays in fp16:
-
-1. **Removed `.float()` calls** — The original code called `.float()` (convert to fp32) after every linear layer. Each call touches ~120 Linear layers, doubling data size each time. Removing this saved **-7.5ms**.
-2. **fp16 norm outputs** — RMSNorm and LayerNorm kernels now output fp16 directly instead of fp32.
-3. **fp16 embeddings** — Token embeddings output fp16 from the start.
-4. **fp16 fused kernels** — SwiGLU and LinearGELU receive and produce fp16.
-
-Internal computation within kernels still uses fp32 (for numerical stability), but all data **stored to VRAM** is fp16, halving memory traffic.
-
----
-
-## 9. KV Cache and the generate_v8b Function
-
-### The O(n²) problem
-
-The baseline `generate()` function works like this:
-```
-Step 1: Process tokens [START, audio_features]              → predict token A
-Step 2: Process tokens [START, audio_features, A]           → predict token B
-Step 3: Process tokens [START, audio_features, A, B]        → predict token C
-...
-Step 13: Process tokens [START, audio_features, A, B, ..., L] → predict token M
-```
-
-Each step reprocesses the **entire sequence from scratch**. This is O(n²) in the number of generated tokens — step 13 does 13x the work of step 1, even though only one new token was added.
-
-### The KV cache solution
-
-In a transformer's attention mechanism, each layer computes Key (K) and Value (V) matrices from the input. For tokens that have already been processed, these K and V values never change. The **KV cache** stores them:
-
-```
-Step 1: Process all tokens → compute K₁,V₁ for every layer → store in cache → predict A
-Step 2: Process only token A → compute K₂,V₂ for token A → append to cache → predict B
-Step 3: Process only token B → compute K₃,V₃ for token B → append to cache → predict C
-```
-
-Now each step after the first only processes **one token**, using the cached K/V from all previous tokens. This reduces generation from O(n²) to O(n).
-
-### Implementation: monkey-patching
-
-The assignment rules say `model.py` is read-only. But `model.py` contains the `generate()` function, which we need to replace with our KV-cached version. Our solution: **monkey-patching**.
-
-Monkey-patching means replacing a method on an object at runtime:
-
+`scaled_dot_product_attention()` (`attention.py:265-269`) falls back to PyTorch SDPA for tiny queries:
 ```python
-def _generate_v8b(self, input_features, input_ids, ...):
-    # KV-cached generation loop
-    ...
-
-# Later, when model is loaded:
-model.generate_v8b = types.MethodType(_generate_v8b, model)
+if q.is_cuda and seq_q <= 4:
+    return torch.nn.functional.scaled_dot_product_attention(
+        q, k, v, attn_mask=attention_mask, is_causal=is_causal, scale=scale
+    )
 ```
 
-The benchmark script already checks for `generate_v8b` and calls it if available.
+During KV-cached decode, seq_q=1. Triton kernel launch overhead dominates for a single row. Impact: -3.5ms (113.5ms to 110.0ms).
 
-### Performance impact
+### GQA handling
 
-KV cache reduced inference from **121.1ms to 113.5ms** (−7.6ms). The saving grows with longer sequences — for 50 tokens, it would save ~80ms.
+The decoder uses 16 query heads / 4 KV heads. `_expand_kv_heads()` (`attention.py:224-234`) uses broadcast expansion (zero-copy `expand` + `reshape`) before the kernel call, so the flash attention kernel always operates on equal head counts.
 
 ---
 
-## 10. Kernel Fusion: SwiGLU and LinearGELU
+## 4. cuBLAS vs. Triton Matmul
 
-### What is kernel fusion?
+`Linear.BACKEND = "torch"` (`layers.py:807`) routes all linear layers through `F.linear()` (cuBLAS). The custom `linear_kernel_tf32` (`layers.py:430-481`) is available via `BACKEND = "triton"` but is ~5ms slower for the model's matrix sizes (1280x1280, 1280x5120, 2048x2048, 2048x5632).
 
-Every time the CPU tells the GPU to run a kernel, there is:
-1. **Launch overhead**: ~5-15μs to set up the kernel
-2. **Memory round-trip**: The kernel reads input from VRAM, computes, writes output to VRAM. The next kernel reads that output from VRAM again.
-
-Kernel fusion combines multiple operations into a single kernel, eliminating both the launch overhead and the intermediate VRAM round-trips.
-
-### Fused SwiGLU
-
-The decoder's MLP uses the SwiGLU activation pattern:
-```
-gate = SiLU(x @ gate_weight)
-up   = x @ up_weight
-output = gate * up
-```
-
-**Unfused** (5 kernel launches, 4 VRAM round-trips):
-1. `temp1 = x @ gate_weight` (cuBLAS matmul → write temp1 to VRAM)
-2. `gate = SiLU(temp1)` (read temp1 → write gate to VRAM)
-3. `temp2 = x @ up_weight` (cuBLAS matmul → write temp2 to VRAM)
-4. `output = gate * temp2` (read gate + temp2 → write output to VRAM)
-
-**Fused** (1 kernel launch, 1 VRAM read, 1 VRAM write):
-1. Load tile of x, gate_weight, up_weight into shared memory
-2. Compute both matmuls in registers
-3. Apply SiLU and multiply in registers
-4. Write final output to VRAM
-
-The fused version eliminates ~3 VRAM round-trips and 4 kernel launches per MLP layer. With 28 decoder layers, that's 84 fewer kernel launches per inference.
-
-### Fused LinearGELU
-
-The encoder's MLP uses:
-```
-output = GELU(x @ weight + bias)
-```
-
-Same principle — fuse the matmul, bias add, and GELU activation into one kernel.
-
-### When fusion doesn't help
-
-- **EncoderMLP.FUSED** — Set to True but never actually used because `model.py` calls `fc1` and `fc2` (plain Linear layers) directly, not the EncoderMLP class.
-- **Very small matrices** — If the input is smaller than one tile (e.g., during single-token decode), the fusion overhead exceeds the benefit. We fall back to cuBLAS for these cases:
-  ```python
-  if num_rows >= self.TILE_M and x.is_cuda:
-      # Use fused Triton kernel
-  else:
-      # Fall back to cuBLAS
-  ```
-
----
-
-## 11. GPUProfile: Portable GPU Detection
-
-### The problem
-
-Different GPUs have different amounts of shared memory, different numbers of compute units (SMs), and different architectural features. A configuration that works well on an RTX 5090 might crash on an H200 (different shared memory layout) or run slowly on an RTX 3090 (not enough SMs for large tiles).
-
-### The solution: GPUProfile
-
-At import time, we detect the GPU and look up pre-tested configurations:
-
+The `__call__` dispatch (`layers.py:844-852`):
 ```python
-GPU = GPUProfile()  # Runs once when layers.py is imported
+def __call__(self, x):
+    if Linear.BACKEND in ("torch", "cublas"):
+        return self._forward_torch(x)
+    if Linear.BACKEND == "triton":
+        return self._forward_triton(x)
 ```
 
-GPUProfile does three things:
-1. **Reads hardware properties** — SM version, shared memory size, GPU name
-2. **Classifies the architecture** — Maps to one of 6 known categories (blackwell_consumer, ada, hopper, blackwell_dc, ampere_dc, ampere_consumer)
-3. **Loads optimal configs** — If the GPU is known, uses tested configs from `_KNOWN_CONFIGS`. If unknown, computes configs dynamically from the shared memory budget.
-
-### The three-tier system
-
-```
-Tier 1: Known GPU     → Use _KNOWN_CONFIGS lookup table (fastest, tested)
-Tier 2: Unknown GPU   → Compute dynamically from shared memory budget (safe, reasonable)
-Tier 3: No GPU / error → CPU fallback with conservative defaults
-```
-
-### Why not just compute dynamically for everything?
-
-The dynamic computation picks the **largest tiles that fit** in shared memory. But "largest" isn't always "fastest" — other factors like register pressure, warp scheduling, and L2 cache behavior can make a slightly smaller tile faster. The hand-tested `_KNOWN_CONFIGS` values capture these nuances that a formula cannot.
-
-For example, on the RTX 5090, the dynamic computation would choose 64×64 tiles for attention (which happens to match our tested config), but it might choose 128×64×32 matmul tiles instead of our tested 64×64×32 — the larger tiles fit in memory but run slightly slower due to register pressure.
+Triton matmul is used only inside fused kernels (`swiglu_fused_kernel`, `linear_gelu_kernel`) where cuBLAS cannot fuse the activation.
 
 ---
 
-## 12. Autotune: Built, Tested, Removed
+## 5. fp16 Pipeline
 
-### What we built
+### Configuration
 
-We implemented a `warmup_attention_tiles()` function (~95 lines) that:
-1. Generated all valid tile configurations for the current GPU's shared memory
-2. Ran a synthetic benchmark (10 warmup + 20 timed iterations) for each config
-3. Stored the fastest config in an `_AUTOTUNE_CACHE` dictionary
-4. Used the cached config for all subsequent attention calls
+Set in `__init__.py`:
+```python
+layers.Linear.BF16 = True        # Enable half-precision path
+layers.Linear._HALF_DTYPE = torch.float16  # fp16 over bf16
+```
 
-### What happened when we tested it
+Despite the attribute name `BF16`, the actual dtype is controlled by `_HALF_DTYPE`. fp16 is 3.6ms faster than bf16 on RTX 5090 (98.5ms vs 102.1ms) due to cuBLAS HGEMM performance differences.
 
-On the RTX 5090, the autotune system selected configs that were **3.1ms slower** than our hand-tuned values:
-- Autotune best: **101.6ms**
-- Hand-tuned: **98.5ms**
+### How it flows through the model
 
-The autotune benchmarked each config in isolation with synthetic data. But real-world performance depends on the **interaction** between all kernels — cache warming, memory fragmentation, and pipeline effects that synthetic benchmarks don't capture.
+`Linear._forward_torch()` (`layers.py:877-884`) caches fp16 weight copies and calls cuBLAS with fp16 inputs:
+```python
+if Linear.BF16:
+    hdtype = Linear._HALF_DTYPE  # torch.float16
+    if self._weight_bf16 is None:
+        self._weight_bf16 = self.weight.to(hdtype)
+        self._bias_bf16 = bias.to(hdtype) if bias is not None else None
+    output = F.linear(x_2d.to(hdtype), self._weight_bf16, self._bias_bf16)
+```
 
-### Why we removed it
+Output stays fp16 (no `.float()` conversion), so the next layer receives fp16 directly. This was the biggest single win: removing `.float()` across ~120 Linear layers saved 7.5ms.
 
-Three reasons:
-1. **It found worse configs** — The hand-tuned values were better.
-2. **It was dead code** — The function was never called by default. You had to manually add a call before any inference.
-3. **Maintenance burden** — ~110 lines of code (function + cache dictionary + cache lookup in the hot path) that served no purpose.
+Norm kernels output fp16 when `Linear.BF16` is True. `rmsnorm_bf16_kernel` (`layers.py:339-364`) stores the result as `tl.float16`:
+```python
+y = (x_norm * w).to(tl.float16)
+tl.store(y_ptr + pid * stride_y + offs, y, mask=mask)
+```
 
-We removed the entire autotune system in a single commit: the `_AUTOTUNE_CACHE` dict, the `warmup_attention_tiles()` function, and the cache lookup in `scaled_dot_product_attention()`.
+`layernorm_kernel` (`layers.py:398-399`) does the same:
+```python
+y = (x_norm * w + b).to(tl.float16)
+```
 
----
+Internal computation stays fp32 throughout (`.to(tl.float32)` on load).
 
-## 13. Rejected Optimizations
+### Embedding fp16 output
 
-We tested many optimizations that did **not** make the final cut. Understanding why they failed is as important as understanding why the adopted ones work.
-
-### Grid swizzling for SwiGLU (+18ms regression)
-
-**What it is:** Grid swizzling reorders which thread blocks process which tiles, so that adjacent blocks access adjacent memory — improving L2 cache hit rates.
-
-**Why it failed:** The RTX 5090 has a large L2 cache (72MB) that already achieves good hit rates with our 64×64 tiles. Swizzling added overhead (extra index math) without improving cache behavior. On GPUs with smaller L2 caches, this might help — but not on our target hardware.
-
-The version from yash/optimize used `GROUP_SIZE_M=8`, a 1D grid, `num_warps=8`, and `num_stages=4`. It regressed by +18ms on the RTX 5090.
-
-### @triton.autotune for GELU/SiLU (+0.7ms)
-
-**What it is:** Triton's built-in `@triton.autotune` decorator benchmarks multiple kernel configurations at the first call and selects the fastest.
-
-**Why it failed:** The tuning warmup itself takes ~0.7ms, and for simple pointwise operations (GELU, SiLU), there are very few configurations to choose from — the "default" was already optimal. The overhead exceeded any possible gain.
-
-### Flash Attention num_stages=2 (OOM on consumer GPUs)
-
-**What it is:** Using double-buffering (pipeline depth 2) in the flash attention kernel.
-
-**Why it failed:** As explained in [Section 5](#5-num_stages-pipeline-depth-double-buffering), consumer GPUs (RTX 3090/4090/5090) have ~99-100KB shared memory. Double-buffering for attention tiles requires ~136KB minimum. The kernel won't launch — it's not a "slower" result, it's a hard failure.
-
-### SDPA fallback for all attention (+5ms)
-
-**What it is:** Using PyTorch's `scaled_dot_product_attention` for all attention computations (not just tiny decode sequences).
-
-**Why it failed:** Our custom flash attention kernel is faster for long sequences (encoder has seq_len up to 1500) because we've tuned the tile sizes for our exact GPU. SDPA uses a one-size-fits-all approach. However, SDPA wins for very short sequences (seq_q ≤ 4) where kernel launch overhead dominates — so we use it only there.
-
-### PyTorch GELU/SiLU in bf16 (+0.3ms)
-
-**What it is:** Using `torch.nn.functional.gelu()` and `torch.nn.functional.silu()` in bf16 instead of our Triton kernels.
-
-**Why it failed:** PyTorch's implementations are already optimized for these operations, but they launch separate kernels. Our Triton kernels fuse the activation with the preceding matmul, avoiding a VRAM round-trip. The +0.3ms comes from the extra kernel launches and memory traffic.
-
-### Softmax bf16 output (0ms effect)
-
-**What it is:** Having the softmax kernel output bf16 instead of fp32.
-
-**Why it failed:** In our flash attention kernel, softmax is computed **in registers** as part of the fused kernel — it never writes to VRAM separately. The only standalone softmax is for final logits (once per inference, ~40 μs), where the dtype makes no measurable difference.
+`Embedding.__call__()` (`layers.py:975`) allocates the output in fp16:
+```python
+out_dtype = torch.float16 if Linear.BF16 else torch.float32
+output = torch.empty((batch_size, self.embedding_dim), dtype=out_dtype, device=...)
+```
 
 ---
 
-## 14. Monkey-Patching: Why and How
+## 6. KV Cache via Monkey-Patching
 
 ### The constraint
 
-The assignment forbids modifying `model.py`. But `model.py` defines:
-- The `generate()` function (which we need to replace with KV-cached version)
-- The `scaled_dot_product_attention` function (which needs to call our flash attention kernel)
+`model.py` is read-only. Its `generate()` is O(n^2) (reprocesses full sequence each step). The KV cache infrastructure (`TextDecoder.forward_with_kv_buffers()`, `allocate_kv_buffers()`) exists in `model.py` but `generate()` doesn't use it.
 
-### What monkey-patching means
+### Deferred patching mechanism
 
-Monkey-patching replaces a function or method on an existing object at runtime. A simple analogy:
+`_try_patch_v8b()` (`layers.py:1482-1493`) is called inside `Linear.__init__()` (`layers.py:810`), which runs during model construction (after `model.py` is fully loaded, avoiding circular imports):
 
 ```python
-class Dog:
-    def speak(self):
-        return "Woof!"
+_v8b_patched = False
 
-dog = Dog()
-dog.speak()  # "Woof!"
-
-# Monkey-patch: replace speak() at runtime
-dog.speak = lambda: "Meow!"
-dog.speak()  # "Meow!"
+def _try_patch_v8b():
+    global _v8b_patched
+    if _v8b_patched:
+        return
+    import sys
+    for mod_name in ('model', 'glm_asr_triton_template.model'):
+        mod = sys.modules.get(mod_name)
+        if mod and hasattr(mod, 'GlmAsrModel') and not hasattr(mod.GlmAsrModel, 'generate_v8b'):
+            mod.GlmAsrModel.generate_v8b = _generate_v8b
+            _v8b_patched = True
+            return
 ```
 
-The class definition wasn't changed — we replaced the method on the instance.
+It patches as a **class method** on `GlmAsrModel` (not an instance method), so `self` is the model instance. The `_v8b_patched` guard makes repeated calls from `Linear.__init__()` no-ops.
 
-### Our monkey-patches
+### The generate_v8b function
 
-1. **`model.generate_v8b`** — Adds a new method (KV-cached generation) to the model instance. The benchmark script already checks for it: `if hasattr(model, 'generate_v8b'): model.generate_v8b(...)`.
-
-2. **`model.scaled_dot_product_attention`** — Replaces the attention function with our flash attention implementation.
-
-### The circular import problem
-
-`model.py` imports `layers.py`. If `layers.py` tried to import `model.py` to patch it, we'd have a circular import. Our solution: **deferred patching**.
-
-The patch function `_try_patch_v8b()` is called inside `Linear.__init__()` — which runs when the model is being constructed. By that time, both modules are fully loaded, and we can safely access the model class:
+`_generate_v8b()` (`layers.py:1381-1477`) uses `self.decode(use_cache=True)`:
 
 ```python
-class Linear:
-    def __init__(self, ...):
-        ...
-        _try_patch_v8b()  # Safe here — model.py is already loaded
+# Prefill: all tokens, build KV cache
+logits, past_kv = self.decode(inputs_embeds=inputs_embeds, use_cache=True)
+
+# Decode loop: one token per step
+for _ in range(max_new_tokens):
+    # ... sampling ...
+    new_embeds = self.text_decoder.embed_tokens(next_token)
+    logits, past_kv = self.decode(
+        inputs_embeds=new_embeds, past_key_values=past_kv, use_cache=True
+    )
 ```
+
+The benchmark script detects `generate_v8b` via `hasattr(model, 'generate_v8b')` and calls it automatically. Impact: -7.6ms (121.1ms to 113.5ms). Savings grow with sequence length.
+
+Input conversion uses `_to_torch_tensor()` (`layers.py:288-300`) which handles numpy arrays, CuPy arrays (`hasattr(arr, 'get')`), and uses `torch.as_tensor()` over `torch.from_numpy()` to avoid numpy version mismatch errors in cu12 environments.
 
 ---
 
-## 15. Dead Code Removal
+## 7. Fused Kernels: SwiGLU and LinearGELU
 
-Over the course of development, we accumulated code that was no longer used. We removed ~383 lines of dead code across multiple commits:
+### Fused SwiGLU
 
-### Removed: Original 3-kernel attention pipeline (~200 lines)
-- `attention_scores_kernel` — Computed Q×K^T scores
-- `softmax_inplace_kernel` — Applied softmax to scores
-- `attention_output_kernel` — Multiplied softmax output by V
-- `causal_mask_kernel` — Applied causal masking
+`swiglu_fused_kernel` (`layers.py:546-605`) computes `SiLU(x @ gate_weight) * (x @ up_weight)` in a single kernel. It maintains two accumulators and loads `x` once:
 
-All replaced by the single `flash_attention_kernel`.
+```python
+gate_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+up_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-### Removed: Autotune system (~110 lines)
-- `_AUTOTUNE_CACHE = {}` — Cache dictionary
-- `warmup_attention_tiles()` — Benchmarking function (~95 lines)
-- Cache lookup in `scaled_dot_product_attention()` — Checked cache before using default tiles
+for k in range(0, K, BLOCK_K):
+    a = tl.load(a_ptr + ...)
+    gate_w = tl.load(gate_ptr + ...)
+    up_w = tl.load(up_ptr + ...)
+    gate_acc += tl.dot(a, gate_w)
+    up_acc += tl.dot(a, up_w)
 
-### Removed: bf16 RMSNorm kernel (~30 lines)
-After switching from bf16 to fp16, the bf16-specific norm kernel was unused.
+sigmoid = 1.0 / (1.0 + tl.exp(-gate_acc))
+out = gate_acc * sigmoid * up_acc
+```
 
-### Removed: Standalone GELU/SiLU/SwiGLU kernels (~40 lines)
-After fusing these into the matmul kernels, the standalone activation kernels were no longer called.
+Activated via `MLP.FUSED = True` (`layers.py:1124`). `MLP.__call__()` (`layers.py:1161-1165`) guards on row count:
+```python
+if self.use_gating and MLP.FUSED and x.is_cuda and num_rows >= self.TILE_M:
+    return self._forward_fused(x)
+return self._forward_standard(x)
+```
 
-### Why we removed dead code
+For small inputs (KV-cached decode, `num_rows < TILE_M`), falls back to unfused cuBLAS. The fused path pre-caches transposed weights in `_prepare_fused_weights()` (`layers.py:1152-1159`) using `Linear._HALF_DTYPE`.
 
-1. **Clarity** — Every line of code someone reads should serve a purpose. Dead code confuses readers who try to understand when it runs.
-2. **Maintenance** — Dead code can silently break without anyone noticing, then cause bugs if someone tries to revive it.
-3. **Compilation** — Triton JIT-compiles kernels on first use. Dead kernels don't get compiled, but their presence in the file slows down IDE tooling and static analysis.
+### Fused LinearGELU
+
+`linear_gelu_kernel` (`layers.py:485-542`) computes `GELU(x @ W + b)`. Applies GELU inline after the matmul accumulation loop:
+```python
+acc = acc + bias[None, :]
+inner = sqrt_2_over_pi * (acc + 0.044715 * acc ** 3)
+acc = acc * 0.5 * (1.0 + tl.extra.cuda.libdevice.tanh(inner))
+```
+
+**Dead code note:** `EncoderMLP.FUSED` and `LinearGELU.FUSED` are set but never triggered because `model.py` (read-only) calls `fc1` / `gelu` / `fc2` as separate operations rather than using the `EncoderMLP` or `LinearGELU` classes.
 
 ---
 
-## 16. Summary of Performance Impact
+## 8. GPUProfile: Architecture Detection
 
-### Complete optimization progression (RTX 5090, 3.5s test audio, 13 tokens)
+`GPUProfile.__init__()` (`layers.py:109-170`) classifies GPUs using `sm_version` and `smem_per_block`:
 
-Every row is a real benchmark measurement. Each optimization was tested individually and committed only if it improved (or did not regress) performance.
+```python
+if sm >= (10, 0) and self.smem_per_block > 120 * 1024:
+    self.arch_name = "blackwell_dc"       # B200
+elif sm >= (9, 0) and self.smem_per_block > 120 * 1024:
+    self.arch_name = "hopper"             # H100/H200
+elif sm >= (8, 9):
+    self.arch_name = "ada"                # RTX 4090
+elif sm >= (8, 0) and self.smem_per_block > 120 * 1024:
+    self.arch_name = "ampere_dc"          # A100
+elif sm >= (8, 0):
+    self.arch_name = "ampere_consumer"    # RTX 3090
+# RTX 5090 reports sm_120 = (12, 0) with ~101KB
+if sm >= (12, 0) and self.smem_per_block <= 120 * 1024:
+    self.arch_name = "blackwell_consumer"
+```
 
-| # | Change | Time | Delta | Mechanism |
-|---|--------|------|-------|-----------|
-| 0 | Baseline (example implementation) | 261.3ms | — | O(n²) generation, fp32, 3-kernel attention |
-| 1 | All Triton kernels + cuBLAS + TF32 | 209.8ms | −51.5ms | Replaced PyTorch ops with Triton/cuBLAS, enabled TF32 tensor cores |
-| 2 | bf16 weights + Flash Attention | 136.4ms | −73.4ms | Halved memory traffic (4B→2B) + fused single-kernel attention |
-| 3 | Fused Q+K RoPE pair kernel (from meave) | 124.6ms | −11.8ms | Fused two separate RoPE kernels into one, halving launch overhead |
-| 4 | bf16 RMSNorm output kernel (from meave) | 120.7ms | −3.9ms | Norm kernel outputs bf16 directly, no fp32→bf16 conversion |
-| 5 | bf16 LayerNorm output | 121.1ms | −0.7ms | Same approach for LayerNorm (minor because fewer LayerNorm layers) |
-| 6 | generate_v8b with KV cache (monkey-patched) | 113.5ms | −7.6ms | O(n) generation — cache K/V, only process new token each step |
-| 7 | SDPA fallback for KV-cached decode (seq_q≤4) | 110.0ms | −3.5ms | PyTorch SDPA is faster than custom kernel for single-token decode |
-| 8 | fp16 cuBLAS HGEMM (was bf16) | 109.6ms | −0.4ms | fp16 tensor core matmul slightly faster than bf16 on RTX 5090 |
-| 9 | Smaller flash attention tiles (from meave) | 109.6ms | ~0ms | Better tile fit for decoder head_dim=128 |
-| 10 | Remove Linear `.float()` conversion | 102.1ms | **−7.5ms** | Eliminated fp16→fp32 cast after every Linear layer (~120 layers) |
-| 11 | Remove silu/gelu Python-side float32 cast | 98.4ms | **−3.7ms** | Activation functions stay in fp16, no round-trip to fp32 |
-| 12 | Remove RMSNorm/LayerNorm float32 cast | 98.1ms | ~−0.3ms | Norms output fp16 directly, downstream layers receive fp16 |
-| 13 | fp16 embedding + fused MLP fp16 + flash attn fp16 | **98.5ms** | ~+0.4ms | Slight noise; all remaining ops now fp16 (pipeline complete) |
+The 120KB threshold discriminates consumer (~99-100KB) from datacenter (~164-228KB) GPUs. The RTX 5090 special case at the end overrides the `blackwell_dc` match because its smem (101KB) is consumer-class despite its sm_120 version.
 
-**Final: 98.5ms on RTX 5090** (measured 2026-03-15).
-**Latest benchmark (2026-03-17): 100.4ms** (after GPUProfile refactor — within noise, no regression).
+The singleton is created at module scope (`layers.py:262`):
+```python
+GPU = GPUProfile()
+```
 
-### Rejected optimizations (tested, measured, not adopted)
+Three-tier fallback: known GPU -> dynamic computation -> CPU defaults (layers.py:172-182).
 
-| Optimization | Source | Result | Why It Failed |
-|---|---|---|---|
-| Swizzled SwiGLU + larger tiles | yash/optimize | **+18ms** (123→141ms) | RTX 5090's large L2 cache already has good locality; swizzle added overhead |
-| @triton.autotune for GELU/SiLU | majed | **+0.7ms** | Tuning warmup cost exceeded any possible gain for simple pointwise ops |
-| Flash Attention num_stages=2 | internal | **Kernel won't launch** | Consumer GPU shared memory (~99KB) can't hold two tile buffers |
-| PyTorch SDPA for prefill/encoder | internal | **+6ms** (108→114.5ms) | Our tuned flash attention is faster for long sequences (seq_len ~1500) |
-| SDPA enable_gqa=True for decode | internal | **+13ms** (→121.6ms) | Manual KV head expansion is faster than SDPA's internal GQA handling |
-| PyTorch GELU/SiLU in bf16 | internal | **+0.3ms** | Extra kernel launches vs our fused Triton kernels |
-| Softmax bf16 output | internal | **0ms** | Softmax is in-register inside flash attention; standalone softmax runs once (~40μs) |
-| Warmup autotune | internal | **+3.1ms** (98.5→101.6ms) | Micro-benchmarks chose configs that were worse in the full pipeline context |
-| EncoderMLP.FUSED | yash/optimize | **N/A** | model.py doesn't use EncoderMLP class — calls fc1/fc2 directly |
-| LinearGELU.FUSED | yash/optimize | **N/A** | model.py doesn't use LinearGELU class — calls linear_1/act directly |
-| Fused gate+up Linear in MLP | internal | **Neutral** | Overhead of larger fused kernel offset the savings from fewer launches |
+---
+
+## 9. Rejected Optimizations
+
+All measured on RTX 5090 (3.5s test audio, 13 tokens):
+
+| Optimization | Result | Root Cause |
+|---|---|---|
+| SwiGLU grid swizzling (GROUP_SIZE_M=8, 1D grid) | **+18ms** | RTX 5090's 72MB L2 already has good locality with 64x64 tiles |
+| `@triton.autotune` for GELU/SiLU | **+0.7ms** | Tuning warmup cost exceeds gain for pointwise ops |
+| Flash attention `num_stages=2` | **Kernel won't launch** | ~99KB smem can't hold two tile buffers (needs ~136KB) |
+| `num_stages=2` threshold: `smem_bytes > 150 * 1024` | -- | Only datacenter GPUs (228KB) benefit from double-buffering |
+| Flash attention `num_warps=8` with 64x64 tiles | **0ms** | Tile too small (4096 elements) to benefit from 256 threads |
+| PyTorch SDPA for encoder/prefill | **+6ms** | Custom kernel with tuned tiles is faster for seq_len ~1500 |
+| SDPA `enable_gqa=True` for decode | **+13ms** | Manual `_expand_kv_heads` + standard SDPA is faster |
+| Runtime autotune (~95 lines) | **+3.1ms** | Micro-benchmarks chose configs worse in full-pipeline context |
+| Softmax bf16 output | **0ms** | Softmax is in-register inside flash attention; standalone runs once (~40us for final logits) |
+| Fused gate+up Linear in MLP | **Neutral** | Reshape overhead offset kernel launch savings |
+
+---
+
+## 10. Performance Summary
+
+### Optimization progression (RTX 5090)
+
+| # | Change | Time | Delta |
+|---|--------|------|-------|
+| 0 | Baseline | 261.3ms | -- |
+| 1 | Triton kernels + cuBLAS + TF32 | 209.8ms | -51.5ms |
+| 2 | bf16 weights + flash attention | 136.4ms | -73.4ms |
+| 3 | Fused Q+K RoPE pair kernel | 124.6ms | -11.8ms |
+| 4 | bf16 RMSNorm output kernel | 120.7ms | -3.9ms |
+| 5 | bf16 LayerNorm output | 121.1ms | -0.7ms |
+| 6 | `generate_v8b` with KV cache | 113.5ms | -7.6ms |
+| 7 | SDPA fallback for seq_q<=4 | 110.0ms | -3.5ms |
+| 8 | fp16 cuBLAS HGEMM | 109.6ms | -0.4ms |
+| 9 | Remove `Linear._forward_torch` `.float()` | 102.1ms | **-7.5ms** |
+| 10 | Remove silu/gelu fp32 cast | 98.4ms | **-3.7ms** |
+| 11 | fp16 norm outputs + embeddings + fused kernels | **98.5ms** | ~0ms |
+
+### Fused RoPE pair kernel
+
+`fused_rope_pair_kernel` (`rope.py:189-265`) processes both Q and K in a single grid launch. Grid: `((total_qh + total_kh) * seq_len,)`. Programs `[0, total_qh * seq_len)` handle Q, the rest handle K. Called in `apply_rotary_pos_emb()` (`rope.py:351-365`):
+
+```python
+total_programs = (total_qh + total_kh) * seq_len
+fused_rope_pair_kernel[(total_programs,)](
+    q_flat, k_flat, cos_half, sin_half, qo_flat, ko_flat,
+    half_dim, head_dim, seq_len, total_qh, total_kh,
+    ...,
+    BLOCK_HD=BLOCK_HD,
+    num_stages=GPU.rope_nstages,
+    num_warps=GPU.rope_nwarps,
+)
+```
+
+Handles partial RoPE for encoder (50% rotary factor) via passthrough copy of remaining dimensions (`rope.py:260-265`).
+
+### Cross-GPU results
+
+| GPU | Our Time | Baseline | Speedup |
+|-----|----------|----------|---------|
+| RTX 5090 (170 SMs) | 100.4ms | 262.2ms | 61.7% |
+| H200 MIG 3g.71gb (60 SMs) | 204.6ms | 464.1ms | 55.9% |
 
 ### Cross-branch comparison
 
-| Branch | Time | Key Technique |
-|--------|------|--------------|
-| **ankush (us)** | **98.5ms** | fp16 pipeline, KV cache, flash attention, cuBLAS, GPUProfile tiles |
+| Branch | Time | Notes |
+|--------|------|-------|
+| ankush | 98.5ms | fp16 pipeline, KV cache, flash attention, cuBLAS, GPUProfile |
 | meave | 127.8ms | fp16 weights, fused RoPE, separate flash_decode_kernel |
-| majed | 187.9ms | cuBLAS, flash attention, SDPA fallback, @triton.autotune |
+| majed | 187.9ms | cuBLAS, flash attention, @triton.autotune |
 
-### Cross-GPU comparison
+---
 
-| GPU | SMs | VRAM | Our Time | Baseline | Speedup |
-|-----|-----|------|----------|----------|---------|
-| RTX 5090 (full) | 170 | 32 GB | 100.4ms | 262.2ms | 61.7% |
-| H200 MIG 3g.71gb | 60 | 70 GB | 204.6ms | 464.1ms | 55.9% |
-| H200 MIG 1g.18gb | 16 | 16 GB | 309.7ms | — | — |
+## 11. H200 Ablation Testing
 
-### Key numbers
+Systematic ablation study on **H200 MIG 3g.71gb** (60 SMs, 70GB HBM3e, 227KB shared memory per block). Each test disables or modifies a single optimization from the fully-optimized baseline, measuring end-to-end inference time (3.5s test audio, 13 tokens, 10 iterations). Baseline optimized: **205.2ms**.
 
-- **Baseline → Final: 261.3ms → 98.5ms (62.3% faster, 2.65x speedup)**
-- **RTX 5090 latest (with GPUProfile): 100.4ms** (within noise of 98.5ms)
-- **Accuracy: 100%** in all benchmarks (no quality loss from any optimization)
-- **Tokens: 13** (consistent across all runs)
-- **Stddev: 0.1-0.5ms** (highly reproducible results)
+### Full results
+
+| # | Test | Time (ms) | Std (ms) | Delta (ms) |
+|---|------|-----------|----------|------------|
+| 1 | baseline_optimized | 205.2 | 0.8 | +0.0 |
+| 2 | precision_fp32 | 206.7 | 1.4 | +1.5 |
+| 3 | fusion_off_mlp | 204.5 | 2.7 | -0.7 |
+| 4 | fusion_off_rope | 234.1 | 1.6 | +28.9 |
+| 5 | backend_triton_matmul | 206.2 | 0.5 | +1.0 |
+| 6 | sdpa_fallback_off | 208.6 | 1.7 | +3.4 |
+| 7 | sdpa_threshold_1 | 203.8 | 0.7 | -1.4 |
+| 8 | sdpa_threshold_8 | 204.8 | 2.3 | -0.4 |
+| 9 | sdpa_threshold_16 | 205.7 | 2.6 | +0.5 |
+| 10 | attn_enc_64x64_s1_w4 | 206.1 | 3.3 | +0.9 |
+| 11 | attn_enc_128x64_s2_w8 | 207.0 | 0.7 | +1.8 |
+| 12 | attn_enc_64x32_s1_w4 | 209.5 | 0.6 | +4.3 |
+| 13 | attn_dec_64x64_s2_w8 | 205.8 | 0.3 | +0.6 |
+| 14 | attn_dec_32x32_s1_w4 | 212.8 | 1.6 | +7.6 |
+| 15 | attn_dec_64x32_s2_w8 | 205.7 | 1.6 | +0.5 |
+| 16 | enc_nstages_1 | 217.4 | 4.8 | +12.2 |
+| 17 | enc_nstages_3 | 207.6 | 2.4 | +2.4 |
+| 18 | enc_nwarps_4 | 217.2 | 0.5 | +12.0 |
+| 19 | enc_nwarps_16 | 209.5 | 0.7 | +4.3 |
+| 20 | matmul_64x64x32 | 207.2 | 1.8 | +2.0 |
+| 21 | matmul_128x64x32 | 204.8 | 0.6 | -0.4 |
+| 22 | matmul_128x128x32 | 208.1 | 1.6 | +2.9 |
+
+### Key findings (ranked by impact)
+
+**1. Fused RoPE is the single largest contributor (+28.9ms).** Disabling `fused_rope_pair_kernel` (`rope.py:189-265`) and falling back to separate Q and K RoPE applications costs 14% of total inference time. On the H200, with only 60 SMs available on the MIG partition, kernel launch overhead is proportionally more expensive than on the RTX 5090 (170 SMs). Fusing the two rotary embedding passes into a single grid launch eliminates one full kernel dispatch and halves global memory round-trips for the position embedding tensors.
+
+**2. Attention pipeline tuning (`num_stages`, `num_warps`) is the second most impactful class of parameters.** Dropping `num_stages` from 2 to 1 costs +12.2ms; dropping `num_warps` from 8 to 4 costs +12.0ms. The H200's 227KB shared memory comfortably supports double-buffered (`num_stages=2`) tiles at 128x128, hiding global memory latency behind compute. With `num_stages=1`, the kernel stalls on DRAM fetches. Similarly, 8 warps (256 threads) fully utilize the 128x128 tile (16,384 elements), while 4 warps leave half the tile bandwidth idle.
+
+**3. Decoder attention tile size matters more than encoder tile size.** `attn_dec_32x32_s1_w4` costs +7.6ms vs +4.3ms for the equivalent encoder downgrade (`attn_enc_64x32_s1_w4`). Decoder attention runs once per generated token across 12 layers with `head_dim=128`, so each tile configuration change is amplified by the autoregressive loop. The default `(128, 64, 2, 8)` for decoder head_dim=128 (`_KNOWN_CONFIGS["hopper"]`) already accounts for the larger per-row shared memory footprint.
+
+**4. SDPA fallback threshold is well-calibrated.** The default threshold of `seq_q <= 4` (`attention.py:265`) saves +3.4ms over no fallback. Lowering to `seq_q <= 1` saves an additional -1.4ms (203.8ms total), suggesting that on the H200 MIG partition, PyTorch SDPA is marginally faster than the custom kernel even for seq_q=2-4. The optimal threshold may differ on full H200 (132 SMs).
+
+**5. Matmul TILE_K=64 justifies the 32-to-64 upgrade.** The default `(128, 128, 64)` vs `(128, 128, 32)` saves 2.9ms. TILE_K=64 means fewer loop iterations in the matmul accumulation loop, and the H200's 227KB smem can hold the larger K-dimension tiles without pressure.
+
+### H200 vs RTX 5090 comparison
+
+The two GPUs expose fundamentally different bottlenecks:
+
+| Parameter | H200 MIG 3g.71gb | RTX 5090 |
+|-----------|-------------------|----------|
+| SMs | 60 | 170 |
+| Shared memory | 227KB | ~99KB |
+| Memory | 70GB HBM3e | 32GB GDDR7 |
+| `num_stages` | 2 (critical: +12.2ms) | 1 (won't launch with 2) |
+| `num_warps` | 8 (critical: +12.0ms) | 4 (8 warps = 0ms change) |
+| Fused RoPE | +28.9ms without | -11.8ms gain (Section 10) |
+| fp16 vs fp32 | +1.5ms (negligible) | -3.6ms (fp16 vs bf16 alone) |
+| Decoder tile sensitivity | +7.6ms (32x32 vs 128x64) | Not tested at same configs |
+
+**What matters on H200:** Double-buffering and warp count. The 227KB shared memory budget enables `num_stages=2` which the RTX 5090 physically cannot use. Disabling double-buffering on H200 is equivalent to running the RTX 5090's memory access pattern on H200 hardware — it costs 12ms because the kernel stalls waiting for HBM3e fetches that could be overlapped with compute.
+
+**What matters on RTX 5090:** Precision and kernel fusion. The fp16-vs-bf16 distinction (3.6ms) and removing `.float()` casts (7.5ms) dominate because the RTX 5090's cuBLAS HGEMM throughput is more sensitive to dtype. The H200's HBM3e bandwidth means data format changes have less relative impact.
+
+### Surprising results
+
+**MLP fusion is neutral on H200 (-0.7ms, within noise).** `fusion_off_mlp` (disabling `swiglu_fused_kernel` and falling back to separate cuBLAS calls for gate/up projections) shows no measurable regression. The fused kernel (`layers.py:546-605`) saves one `x` reload and one kernel launch, but cuBLAS on the H200 is already extremely efficient at the model's matrix sizes (1280x5120). The HBM3e bandwidth (4.8 TB/s peak) means reloading `x` is nearly free for the batch sizes encountered. On the RTX 5090, MLP fusion was similarly neutral (Section 9: "Fused gate+up Linear in MLP — Neutral"), confirming this is a model-size effect rather than an architecture effect.
+
+**fp16 barely matters on H200 (+1.5ms).** `precision_fp32` forces all computation to fp32, yet the regression is only 1.5ms (0.7% of total time). On the RTX 5090, fp16 was a major win (Section 5: removing `.float()` saved 7.5ms alone). The H200 MIG partition is compute-bound rather than bandwidth-bound at these matrix sizes — the 60 SMs cannot saturate HBM3e bandwidth regardless of data width. The fp16 path still helps by reducing shared memory tile footprint (enabling larger tiles), but the direct bandwidth savings are negligible.
+
+**Triton matmul nearly matches cuBLAS (+1.0ms).** `backend_triton_matmul` switches all `Linear` layers from `F.linear()` (cuBLAS HGEMM) to `linear_kernel_tf32` (`layers.py:430-481`). The gap is only 1.0ms on H200 vs ~5ms on RTX 5090 (Section 4). The H200's `sm_90` ISA gives Triton better codegen targets (wgmma instructions), narrowing the gap with cuBLAS's hand-tuned PTX. For a project with tighter deadlines, the Triton matmul backend would have been acceptable on H200.
+
+### What the data tells us about the H200 architecture
+
+**Latency-bound, not throughput-bound (on MIG).** The 60-SM MIG partition shifts the bottleneck from memory bandwidth to kernel launch overhead and pipeline stalls. Evidence: fused RoPE (+28.9ms) and `num_stages` (+12.2ms) are the top two regressions, both of which address latency hiding rather than raw throughput. On a full H200 (132 SMs), the balance would shift toward bandwidth sensitivity.
+
+**Double-buffering is the H200's defining advantage.** The 227KB shared memory enables `num_stages=2` for attention tiles up to 128x128, which is physically impossible on consumer GPUs (~99KB). This single capability accounts for 12.2ms of savings — nearly 6% of inference time. The `_KNOWN_CONFIGS["hopper"]` entry (`layers.py:39-47`) correctly prioritizes larger tiles with `nstages=2` over the smaller single-buffered configurations used on consumer architectures.
+
+**Warp occupancy scales with tile area.** 8 warps benefit 128x128 tiles (+12.0ms regression at 4 warps) but 16 warps show diminishing returns (+4.3ms regression). The sweet spot is `tile_area / 32 = warps`: 128x128=16384 elements, 16384/32=512 threads=16 warps would be ideal by this metric, but register pressure at 16 warps likely causes spills. The 8-warp default (256 threads) balances occupancy against register file usage.
+
+**HBM3e bandwidth masks precision effects.** The 4.8 TB/s peak bandwidth of HBM3e (even partitioned to ~1.6 TB/s on MIG 3g) means that fp16-vs-fp32 memory traffic differences are absorbed by the memory controller before becoming a bottleneck. This contrasts sharply with GDDR7 on the RTX 5090, where every byte of memory traffic competes with compute for attention.

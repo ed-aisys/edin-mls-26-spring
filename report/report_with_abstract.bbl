@@ -1,0 +1,58 @@
+\begin{thebibliography}{8}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Ainslie et~al.(2023)Ainslie, Lee-Thorp, de~Jong, Zemlyanskiy,
+  Lebr{\'o}n, and Sanghai]{ainslie2023gqa}
+Joshua Ainslie, James Lee-Thorp, Michiel de~Jong, Yury Zemlyanskiy, Federico
+  Lebr{\'o}n, and Sumit Sanghai.
+\newblock Gqa: Training generalized multi-query transformer models from
+  multi-head checkpoints.
+\newblock \emph{arXiv preprint arXiv:2305.13245}, 2023.
+
+\bibitem[Dao(2023)]{dao2023flashattention2fasterattentionbetter}
+Tri Dao.
+\newblock Flashattention-2: Faster attention with better parallelism and work
+  partitioning, 2023.
+\newblock URL \url{https://arxiv.org/abs/2307.08691}.
+
+\bibitem[Milakov \& Gimelshein(2018)Milakov and Gimelshein]{milakov2018online}
+Maxim Milakov and Natalia Gimelshein.
+\newblock Online normalizer calculation for softmax.
+\newblock In \emph{arXiv preprint arXiv:1805.02867}, 2018.
+
+\bibitem[Ringlein et~al.(2025)Ringlein, van Lunteren, Stoica, and
+  Parnell]{ringlein2025anatomy}
+Burkhard Ringlein, Jan van Lunteren, Radu Stoica, and Thomas Parnell.
+\newblock The anatomy of a triton attention kernel.
+\newblock \emph{arXiv preprint arXiv:2511.11581}, 2025.
+
+\bibitem[Shazeer(2020)]{shazeer2020glu}
+Noam Shazeer.
+\newblock Glu variants improve transformer.
+\newblock \emph{arXiv preprint arXiv:2002.05202}, 2020.
+
+\bibitem[Su et~al.(2024)Su, Ahmed, Lu, Pan, Bo, and Liu]{su2024roformer}
+Jianlin Su, Murtadha Ahmed, Yu~Lu, Shengfeng Pan, Wen Bo, and Yunfeng Liu.
+\newblock Roformer: Enhanced transformer with rotary position embedding.
+\newblock \emph{Neurocomputing}, 568:\penalty0 127063, 2024.
+
+\bibitem[Tillet et~al.(2019)Tillet, Kung, and Cox]{tillet2019triton}
+Philippe Tillet, Hsiang-Tsung Kung, and David Cox.
+\newblock Triton: an intermediate language and compiler for tiled neural
+  network computations.
+\newblock In \emph{Proceedings of the 3rd ACM SIGPLAN International Workshop on
+  Machine Learning and Programming Languages}, pp.\  10--19, 2019.
+
+\bibitem[Williams et~al.(2009)Williams, Waterman, and
+  Patterson]{williams2009roofline}
+Samuel Williams, Andrew Waterman, and David Patterson.
+\newblock Roofline: an insightful visual performance model for multicore
+  architectures.
+\newblock \emph{Communications of the ACM}, 52\penalty0 (4):\penalty0 65--76,
+  2009.
+
+\end{thebibliography}

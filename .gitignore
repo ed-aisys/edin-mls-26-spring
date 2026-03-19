@@ -24,3 +24,11 @@ Thumbs.db
 
 # Lock files (platform-specific, use requirements-*.lock as reference)
 requirements.lock
+
+# Report dependencies & figures
+report/fancyhdr.sty
+report/natbib.sty
+report/iclr2025_conference.sty
+report/iclr2025_conference.bst
+report/workflow.png
+report/figure/workflow.png
