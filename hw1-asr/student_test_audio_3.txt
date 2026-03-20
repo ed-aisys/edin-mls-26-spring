@@ -1,0 +1,6 @@
+Expected transcription:
+ANY NOISE ANNOYS AN OYSTER BUT A NOISY OYSTER ANNOYS AN OYSTER MORE
+
+Source: Self recorded
+Duration: ~10 seconds
+Sample rate: 16000 Hz
