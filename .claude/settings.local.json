@@ -1,7 +1,28 @@
 {
   "permissions": {
     "allow": [
-      "Bash(mv /root/.claude /workspace/.claude-home && ln -s /workspace/.claude-home /root/.claude)"
+      "Bash(mv /root/.claude /workspace/.claude-home && ln -s /workspace/.claude-home /root/.claude)",
+      "Bash(python3:*)",
+      "Bash(nvidia-smi:*)",
+      "Bash(squeue:*)",
+      "Bash(pip --version)",
+      "Bash(conda --version)",
+      "Read(//home/s2884198/**)",
+      "Read(//opt/conda/**)",
+      "Bash(bash utils/setup-triton.sh -y 2>&1)",
+      "Bash(chmod:*)",
+      "Bash(~/.conda/envs/mls/bin/python -c \"import torch; print\\('PyTorch:', torch.__version__\\); import triton; print\\('Triton:', triton.__version__\\); import numpy; print\\('NumPy:', numpy.__version__\\)\" 2>&1)",
+      "Bash(~/.conda/envs/mls/bin/pip list:*)",
+      "Bash(~/.conda/envs/mls/bin/pip install:*)",
+      "Bash(bash /home/s2884198/edin-mls-26-spring/fix-cuda.sh 2>&1)",
+      "Bash(scontrol show:*)",
+      "Bash(srun:*)",
+      "Bash(wc:*)",
+      "Bash(grep:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(git remote:*)"
     ]
   }
 }
