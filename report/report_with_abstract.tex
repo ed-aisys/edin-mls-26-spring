@@ -43,7 +43,7 @@ Its inference workload is dominated by matrix multiplications, attention computa
 
 GPU kernel optimization matters because default PyTorch operators do not exploit hardware-specific features such as extended shared memory, tensor-core-friendly data layouts, or operation fusion across kernel boundaries.
 We design and optimize a complete working implementation using Triton~\citep{tillet2019triton} to create custom GPU kernels.
-By writing custom kernels, we can fuse multiple operations into a single kernel launch, tune tile sizes to the GPU's shared memory capacity, and select data types that maximize throughput---eliminating the intermediate VRAM round-trips that dominate latency in the default implementation.
+By writing custom kernels, we can fuse multiple operations into a single kernel launch, tune tile sizes to the GPU's shared memory capacity, and select data types that maximize throughput---eliminating the intermediate video RAM (VRAM) round-trips that dominate latency in the default implementation.
 
 The principal constraint is the kernel design space, as tile dimensions, warp counts, pipeline stages, and data types interact in non-obvious ways, and a configuration that works on one GPU architecture may fail or regress on another.
 
@@ -66,7 +66,7 @@ We test each component individually and integrate them in a bottom-up fashion, v
 \texttt{silu\_kernel} & layers.py & Decoder MLP & SiLU activation \\
 \texttt{rmsnorm\_kernel} & layers.py & Decoder norms & RMSNorm + fp16 output \\
 \texttt{layernorm\_kernel} & layers.py & Encoder norms & LayerNorm + fp16 output \\
-\texttt{linear\_kernel\_tf32} & layers.py & Matmul & Tiled GEMM (TF32) \\
+\texttt{linear\_kernel\_tf32} & layers.py & Matmul & General Matrix Multiply (GEMM) \\
 \texttt{fused\_swiglu\_kernel} & layers.py & Decoder MLP & Fused SwiGLU \\
 \texttt{fused\_linear\_gelu\_kernel} & layers.py & Encoder MLP & Fused Linear+GELU \\
 \texttt{flash\_attention\_kernel} & attention.py & Attention & Flash Attention \\
@@ -101,7 +101,7 @@ We test each component individually and integrate them in a bottom-up fashion, v
 \label{fig:asr-pipeline}
 \end{figure}
 
-In addition to the required kernels, we implement four additional optimizations: (1)~a KV-cached generation loop (\texttt{generate\_v8b}) that reduces decoding from $O(n^2)$ to $O(n)$, (2)~an end-to-end fp16 precision pipeline that halves memory traffic, (3)~a \texttt{GPUProfile} system that adapts tile sizes to the target GPU at import time, and (4)~a PyTorch SDPA fallback for single-token decode steps where kernel launch overhead exceeds computation cost.
+In addition to the required kernels, we implement four additional optimizations: (1)~a KV-cached generation loop (\texttt{generate\_v8b}) that reduces decoding from $O(n^2)$ to $O(n)$, (2)~an end-to-end fp16 precision pipeline that halves memory traffic, (3)~a \texttt{GPUProfile} system that adapts tile sizes to the target GPU at import time, and (4)~a PyTorch Scaled Dot-Product Attention (SDPA) fallback for single-token decode steps where kernel launch overhead exceeds computation cost.
 Each subcomponent is modular in order to produce a robust, adaptable and portable system.
 
 \textbf{Headline results.}  Upon completion of this project, our final implementation achieves \textbf{204.8\,ms} end-to-end latency on an H200 MIG~3g.71gb partition (baseline: 464.1\,ms), a \textbf{2.27$\times$ speedup} with \textbf{100\% transcription accuracy}.  On an RTX~5090, the same code achieves \textbf{100.4\,ms} (2.61$\times$).
@@ -117,16 +117,16 @@ The GLM-ASR inference pipeline (Figure~\ref{fig:asr-pipeline}) has five computat
 We employ a performance-budgeting technique to attribute latency to each stage and identify where optimization effort would yield the largest gains.
 
 \textbf{Phase~1: Mel Spectrogram + Conv1D Subsampling.}
-Converts raw 16\,kHz audio to 128-bin Mel features and downsamples 4$\times$ via strided 1D convolutions.  These are PyTorch built-in operations (read-only \texttt{conv.py}); we do not modify them.  The phase is bandwidth-bound due to large feature maps with simple arithmetic.
+Converts raw 16\,kHz audio to 128-bin Mel features and downsamples 4$\times$ via strided 1D convolutions.  These are PyTorch built-in operations (read-only \texttt{conv.py}), which we do not modify.  The phase is bandwidth-bound due to large feature maps with simple arithmetic.
 
 \textbf{Phase~2: Audio Encoder (32 layers).}
-Each layer applies LayerNorm, self-attention (20 heads, $d_k$=64), and a two-layer MLP with GELU activation.  RoPE~\citep{su2024roformer} is applied to 50\% of head dimensions.  On the H200, encoder attention (AI~$\sim$20--40) crosses the ridge point and is \emph{compute-bound}, while on consumer GPUs with lower bandwidth-to-compute ratios it remains bandwidth-bound.  The large linear projections ($1280 \times 5120$) are \emph{compute-bound} on all architectures.
+Each layer applies LayerNorm, self-attention (20 heads, $d_k$=64), and a two-layer multi-layer perceptron (MLP) with GELU activation.  Rotary Position Embedding (RoPE)~\citep{su2024roformer} is applied to 50\% of head dimensions (the first 32 of 64 are rotated, as specified by the model architecture).  On the H200, encoder attention has an AI of $\sim$20--40, exceeding the GPU's ridge point (Section~\ref{sec:bottleneck}), making it compute-bound. On consumer GPUs with higher ridge points it remains bandwidth-bound.  The linear projections ($1280 \times 5120$) are compute-bound on all architectures.
 
 \textbf{Phase~3: Multi-modal Projector.}
 Pools 4 encoder frames and projects $5120 \to 4096 \to 2048$ through two linear layers with GELU.  This is a small, latency-dominated phase (7.2\,ms on H200, 0.6\% of total).
 
 \textbf{Phase~4: Text Decoder Prefill (28 layers).}
-Processes the full concatenated sequence (audio embeddings + prompt tokens) through 28 decoder layers with RMSNorm, GQA attention (16 query / 4 KV heads, $d_k$=128), and SwiGLU MLP~\citep{shazeer2020glu}.  Bandwidth-bound for attention; compute-bound for the large linear projections ($2048 \times 5632$).
+Processes the full concatenated sequence (audio embeddings + prompt tokens) through 28 decoder layers with RMSNorm, Grouped Query Attention (GQA, 16 query / 4 KV heads, $d_k$=128)~\citep{ainslie2023gqa}, and SwiGLU MLP~\citep{shazeer2020glu}.  Bandwidth-bound for attention, compute-bound for the large linear projections ($2048 \times 5632$).
 
 \textbf{Phase~5: Autoregressive Decoding.}
 Generates tokens one at a time.  With the baseline's $O(n^2)$ \texttt{generate()} function, this phase dominates wall-clock time, as each step reprocesses the full growing sequence from scratch.  Our KV-cached \texttt{generate\_v8b} stores key/value projections for all previous tokens, processing only the new token each step.  This reduces decoding to $O(n)$, bringing the phase down to 50.8\% of total time (from an estimated $>$80\% in the baseline).
@@ -151,7 +151,7 @@ We use \texttt{num\_warps}=8 for large tiles ($\geq$4096 elements) and 4 otherwi
 For \texttt{num\_stages}: the H200's $\sim$228\,KB shared memory accommodates double-buffering (\texttt{num\_stages}=2), overlapping tile loads with computation for higher throughput on memory-bound kernels.  Consumer GPUs (RTX~5090, $\sim$99\,KB) must use single-buffering (\texttt{num\_stages}=1), since double-buffering the same tiles would require $\sim$136\,KB---exceeding the available shared memory.
 
 \textbf{Data layout and GQA.}
-All tensors are stored in \texttt{(batch$\times$heads, seq, dim)} layout for coalesced access.  For Grouped Query Attention~\citep{ainslie2023gqa} in the text decoder (16 query heads, 4 KV heads), we expand KV heads by a factor of 4 before the attention kernel.  When tested, PyTorch SDPA's native \texttt{enable\_gqa=True} regressed by +13\,ms; manual expansion gives explicit control over data layout.
+All tensors are stored in \texttt{(batch$\times$heads, seq, dim)} layout for coalesced access.  For GQA in the text decoder (16 query heads, 4 KV heads), we expand KV heads by a factor of 4 before the attention kernel.  When tested, PyTorch SDPA's native \texttt{enable\_gqa=True} regressed by +13\,ms. Manual expansion gives explicit control over data layout.
 
 \textbf{Precision pipeline.}
 Our largest single optimization is the end-to-end fp16 pipeline.
@@ -164,17 +164,17 @@ Removing these conversions and keeping all VRAM-resident data in fp16 halved mem
 
 \subsection{Setup}
 
-All primary measurements use the Edinburgh teaching cluster node \texttt{saxa.inf.ed.ac.uk} with an NVIDIA H200 MIG~3g.71gb partition (Hopper, 60 SMs, 70\,GB HBM3e, $\sim$228\,KB opt-in shared memory).
+All primary measurements use the Edinburgh teaching cluster node \texttt{saxa.inf.ed.ac.uk} with an NVIDIA H200 MIG~3g.71gb partition (Hopper architecture, 60 Streaming Multiprocessors (SMs), 70\,GB HBM3e, $\sim$228\,KB opt-in shared memory).
 The software stack is CUDA~13.0, PyTorch~2.10.0, Triton~3.6.0, Python~3.11.
 Jobs are submitted via SLURM: \texttt{srun -p Teaching -w saxa --gres gpu:3g.71gb:1 --mem=32G}.
 The test input is a 3.5\,s WAV file (``Concord returned to its place amidst the tents'').
 
-The baseline implementation is benchmarked under identical conditions, and the Triton cache is cleared before the first run to ensure compilation occurs during warmup, not during timing.
+The Triton cache is cleared before the first run to ensure compilation occurs during warmup, not during timing.
 Each student benchmark run uses 2 warmup iterations followed by 5 timed iterations.  We report the mean and standard deviation across 5 independent benchmark invocations (25 timed iterations total).
 
 \subsection{End-to-end Evaluation}
 
-Table~\ref{tab:e2e} summarizes the end-to-end results on the teaching cluster.  Run~4 shows slightly higher latency (209.4\,ms), likely due to MIG partition contention from concurrent cluster users; all other runs cluster tightly around 203--204\,ms.
+Table~\ref{tab:e2e} summarizes the end-to-end results on the teaching cluster.  Run~4 shows slightly higher latency (209.4\,ms), likely due to MIG partition contention from concurrent cluster users. All other runs cluster tightly around 203--204\,ms.
 
 \begin{table}[h]
 \centering
@@ -198,11 +198,11 @@ Table~\ref{tab:e2e} summarizes the end-to-end results on the teaching cluster.  
 
 \subsection{Component/Operator-Level Breakdown}
 
-Table~\ref{tab:detailed} shows per-component profiling (averaged over runs 2--5 of \texttt{benchmark\_detailed.py}, which generates 50 tokens using the stock $O(n^2)$ path; run~1 is excluded due to Triton compilation during warmup).
+Table~\ref{tab:e2e} measures end-to-end latency with KV-cached $O(n)$ generation (13 tokens).  Table~\ref{tab:detailed} profiles each component in isolation using \texttt{benchmark\_detailed.py}: individual forward passes with single-token decode steps (no KV history).  Results are averaged over runs 2--5 (run~1 excluded due to Triton compilation).
 
 \begin{table}[h]
 \centering
-\caption{Component-level profiling (H200 MIG, 50 tokens, stock generate path, runs 2--5).}
+\caption{Component-level profiling (H200 MIG, isolated forward passes, runs 2--5).}
 \label{tab:detailed}
 \small
 \begin{tabular}{@{}lrrr@{}}
@@ -227,11 +227,13 @@ Decoder decode consumes over half of total time (50.8\%) even with our optimized
 
 \subsection{Compute-Bound vs Memory-Bound Classification}
 
-We classify each kernel using the roofline model~\citep{williams2009roofline}, which relates arithmetic intensity (AI)---floating-point operations per byte of memory traffic---to peak compute and bandwidth.  For the H200 MIG~3g.71gb partition (60 of 132 SMs), we estimate peak FP32 throughput at $\sim$30.5\,TFLOPS and HBM3e bandwidth at $\sim$2.4\,TB/s (proportional to memory controller allocation).  The ridge point is:
+We classify each kernel using the roofline model~\citep{williams2009roofline}, which plots achievable throughput against AI to produce a roof-shaped curve: a sloped bandwidth-limited region meeting a flat compute-limited ceiling.  The ridge point where they meet equals peak FLOPS divided by peak bandwidth.
+
+For the H200 MIG~3g.71gb, the full GPU has 132 SMs at $\sim$67\,TFLOPS FP32. Our 60-SM partition achieves $(60/132) \times 67 \approx 30.5$\,TFLOPS.  The partition receives 4 of 8 HBM3e memory slices, giving $(4/8) \times 4.8 \approx 2.4$\,TB/s.  The ridge point is:
 \begin{equation}
 \text{AI}_{\text{ridge}} = \frac{\text{Peak FLOPS}}{\text{Peak BW}} = \frac{30.5 \times 10^{12}}{2.4 \times 10^{9}} \approx 12.7 \text{\,FLOP/byte}
 \end{equation}
-Operations with AI $<$ 12.7 are bandwidth-bound; those above are compute-bound.
+Operations with AI $<$ 12.7 are bandwidth-bound. Those above are compute-bound.
 
 \begin{table}[h]
 \centering
@@ -253,7 +255,7 @@ RoPE & $\sim$3--5 & Bandwidth & Load, rotate, store \\
 \end{tabular}
 \end{table}
 
-A notable consequence of the H200's high bandwidth-to-compute ratio is that encoder attention (AI~$\sim$20--40) crosses the ridge point and becomes \emph{compute-bound}, unlike on consumer GPUs such as the RTX~5090 (ridge~$\approx$58.5) where it remains bandwidth-bound.  This means the H200 benefits more from larger attention tiles (128$\times$128 vs.\ 64$\times$64) that increase compute utilization, while the RTX~5090 benefits more from the fp16 pipeline that reduces memory traffic.
+A notable consequence is that encoder attention (AI~$\sim$20--40) crosses the H200's ridge point and becomes compute-bound, unlike on consumer GPUs (ridge~$\approx$58.5) where it remains bandwidth-bound.  The H200 thus benefits more from larger tiles (128$\times$128) that increase compute utilization.
 
 \subsection{Overall Bottleneck}
 
@@ -310,7 +312,7 @@ Figure~\ref{fig:progression} summarizes the cumulative impact.
 \end{axis}
 \end{tikzpicture}
 \vspace{-1ex}
-\caption{Optimization progression on RTX~5090 (cumulative).  Each bar shows end-to-end latency after applying all optimizations up to that step.  Full step-by-step breakdown in Appendix Table~\ref{tab:progression}.}
+\caption{Optimization progression (development GPU, RTX~5090).  Each bar shows end-to-end latency after applying all optimizations up to that step.  Validated on H200 at 204.8\,ms (Section~\ref{sec:comparison}).  Full breakdown in Appendix Table~\ref{tab:progression}.}
 \label{fig:progression}
 \end{figure}
 
@@ -321,7 +323,7 @@ Figure~\ref{fig:progression} summarizes the cumulative impact.
 \textbf{Change:} We tested all valid tile configurations for the flash attention kernel---$(128,128)$, $(128,64)$, $(64,64)$, $(64,32)$, $(32,32)$, $(16,16)$---computing shared memory usage via Eq.~\ref{eq:smem} for each.  We also built an autotune system ($\sim$95 lines) that benchmarked each valid configuration at runtime.
 
 \textbf{Result:} Initially, we used Triton's built-in \texttt{@triton.autotune} to select optimal tile configurations at runtime.  However, when tested, the autotune system selected $\texttt{BLOCK\_M}$=16 as optimal in micro-benchmarks, but the full-pipeline benchmark showed \textbf{101.6\,ms vs.\ 98.5\,ms} for our hand-tuned 64$\times$64 configuration---a 3.1\,ms regression.  We determine that the micro-benchmark methodology is too unreliable to capture full-pipeline cache effects.
-In response, we developed a \texttt{GPUProfile} (\texttt{layers.py:89}) system with pre-tested configurations stored in \texttt{\_KNOWN\_CONFIGS} (\texttt{layers.py:23}); unknown GPUs use dynamic computation largest-to-smallest against the shared memory budget.
+In response, we developed a \texttt{GPUProfile} (\texttt{layers.py:89}) system with pre-tested configurations stored in \texttt{\_KNOWN\_CONFIGS} (\texttt{layers.py:23}). Unknown GPUs use dynamic computation largest-to-smallest against the shared memory budget.
 We validated these choices through a 22-configuration ablation study on the H200 (Appendix Table~\ref{tab:ablation}), which confirmed that \texttt{num\_stages}=2 and \texttt{num\_warps}=8 are each worth $\sim$12\,ms.
 
 \subsection{Kernel Fusion}\label{sec:fusion}
@@ -330,7 +332,7 @@ We validated these choices through a 22-configuration ablation study on the H200
 
 \textbf{Change:} We wrote \texttt{swiglu\_fused\_kernel} (\texttt{layers.py:546}) that loads tiles of $\mathbf{x}$, $\mathbf{W}_g$, and $\mathbf{W}_u$ into shared memory, computes both matrix products in registers, applies SiLU and the element-wise multiply, and writes only the final result to VRAM.  The unfused path requires 5 kernel launches and 4 VRAM round-trips; the fused path requires 1 launch and 1 round-trip.
 
-\textbf{Result:} With 28 decoder layers, fusion eliminates $\sim$84 kernel launches per inference.  Combined with the analogous \texttt{fused\_linear\_gelu\_kernel} for the encoder, this contributed to the overall progression from 209.8\,ms to 136.4\,ms (bundled with bf16 conversion).  For very small inputs (single-token decode, where $M < \texttt{TILE\_M}$), we fall back to cuBLAS, which has lower launch overhead for small matrices.
+\textbf{Result:} With 28 decoder layers, fusion eliminates $\sim$84 kernel launches per inference.  For very small inputs (single-token decode, where $M < \texttt{TILE\_M}$), we fall back to cuBLAS, which has lower launch overhead for small matrices.  On the H200, MLP fusion contributes only $-$0.7\,ms (Appendix Table~\ref{tab:ablation}), because cuBLAS already saturates compute throughput for these matrix sizes.
 
 \subsection{FlashAttention-Style Attention}
 
@@ -340,18 +342,18 @@ We validated these choices through a 22-configuration ablation study on the H200
 
 Causal masking is handled via a compile-time \texttt{IS\_CAUSAL} flag that skips tiles entirely above the diagonal, avoiding wasted computation.  For single-token KV-cached decode (\texttt{seq\_q} $\leq$ 4), we fall back to PyTorch's \texttt{scaled\_dot\_product\_attention}, which has lower launch overhead for this degenerate case.
 
-\textbf{Result:} Flash attention contributed significantly to the 209.8\,ms $\to$ 136.4\,ms improvement (combined with bf16 weights).  The SDPA fallback for decode saved an additional 3.5\,ms.
+\textbf{Result:} On the H200, disabling the SDPA fallback costs +3.4\,ms (Appendix Table~\ref{tab:ablation}), confirming the benefit of routing single-token decode to PyTorch's optimized path.
 
 \subsection{Other Optimizations}
 
 \textbf{fp16-throughout pipeline.}
-The original code called \texttt{.float()} after every Linear layer ($\sim$120 calls), doubling data size at each point.  Removing these conversions and keeping the entire pipeline in fp16 saved \textbf{11.5\,ms} (110.0 $\to$ 98.5\,ms on RTX~5090).  Internal computation remains fp32 for numerical stability.
+The original code called \texttt{.float()} after every Linear layer ($\sim$120 calls), doubling data size at each point.  Removing these conversions and keeping the entire pipeline in fp16 saves 11.5\,ms on the development GPU (RTX~5090).  On the H200, fp16 contributes only +1.5\,ms (Appendix Table~\ref{tab:ablation}), reflecting HBM3e's superior bandwidth.  Internal computation remains fp32 for numerical stability.
 
 \textbf{KV-cache decoding (\texttt{generate\_v8b}).}
-The stock \texttt{generate()} reprocesses the full growing sequence on every decode step ($O(n^2)$).  We implemented a KV-cached generation loop that processes only the new token each step, appending its K/V to a cache.  This is monkey-patched onto the model via \texttt{\_try\_patch\_v8b()} (\texttt{layers.py:1482}), called during \texttt{Linear.\_\_init\_\_}.  Impact: \textbf{$-$7.6\,ms} (121.1 $\to$ 113.5\,ms).
+The stock \texttt{generate()} reprocesses the full growing sequence on every decode step ($O(n^2)$).  We implemented a KV-cached generation loop that processes only the new token each step, appending its K/V to a cache.  This is monkey-patched onto the model via \texttt{\_try\_patch\_v8b()} (\texttt{layers.py:1482}), called during \texttt{Linear.\_\_init\_\_}.  Impact on development GPU: $-$7.6\,ms.
 
 \textbf{Fused Q+K RoPE kernel.}
-Rotary position embeddings~\citep{su2024roformer} require applying the same rotation to both Q and K.  The baseline uses two separate kernel launches; we fuse them into \texttt{fused\_rope\_pair\_kernel} (\texttt{rope.py:189}), halving launch overhead.  Impact: \textbf{$-$11.8\,ms} (136.4 $\to$ 124.6\,ms).
+RoPE requires applying the same rotation to both Q and K.  The baseline uses two separate kernel launches. We fuse them into \texttt{fused\_rope\_pair\_kernel} (\texttt{rope.py:189}), halving launch overhead.  On the H200, this is the most impactful single optimization: disabling it costs +28.9\,ms (Appendix Table~\ref{tab:ablation}). On the development GPU, impact was $-$11.8\,ms.
 
 
 %======================================================================
@@ -381,11 +383,11 @@ Example baseline & 464.1 & 35.70 & 100\% & 1.00$\times$ \\
 
 \subsection{Per-Operator Comparison}
 
-Table~\ref{tab:peroperator} compares per-component times between our implementation and the baseline, profiled on the RTX~5090 development GPU where baseline component-level data is available (50 tokens, stock $O(n^2)$ generate path).
+Table~\ref{tab:peroperator} compares per-component times between our implementation and the baseline, profiled on the RTX~5090 development GPU where baseline component-level data is available (isolated forward passes, 50 decode steps).
 
 \begin{table}[h]
 \centering
-\caption{Per-component comparison (50 tokens, stock generate path, RTX~5090).}
+\caption{Per-component comparison (isolated forward passes, 50 decode steps, RTX~5090).}
 \label{tab:peroperator}
 \small
 \begin{tabular}{@{}lrrrr@{}}
@@ -444,17 +446,12 @@ The success in meeting the performance objectives is the result of prioritizing 
 
 \textbf{Key lessons.}
 (1)~The pipeline is overwhelmingly \emph{memory-bandwidth-bound}: halving data types (fp32$\to$fp16) and eliminating intermediate writes (kernel fusion, flash attention) provided the largest gains.
-(2)~Attention is the most challenging kernel to optimize because tile size, shared memory, warp count, and pipeline stages are tightly coupled; the H200's 228\,KB shared memory accommodates 128$\times$128 tiles with double-buffering, while consumer GPUs with $\sim$99\,KB require 64$\times$64 with single-buffering---demonstrating the need for a portable \texttt{GPUProfile} system.
+(2)~Attention is the most challenging kernel because tile size, shared memory, warps, and pipeline stages are tightly coupled. The H200's 228\,KB accommodates 128$\times$128 tiles with double-buffering, while consumer GPUs ($\sim$99\,KB) require 64$\times$64 with single-buffering.
 (3)~Profile before optimizing: our initial assumption that compute-bound matmul is the bottleneck proves wrong---decoder decode steps (bandwidth-bound attention + KV reads) consume 50.8\% of total time on H200 even after optimization.
-(4)~Problems arise when kernels are composed in the full pipeline, as cache interactions between adjacent kernels produce behaviors not visible in isolated benchmarks.
+(4)~Problems arise when kernels are composed, as cache interactions produce behaviors not visible in isolated benchmarks.
 
 \textbf{Surprising findings.}
-The autotune system found \emph{worse} configurations than hand-tuning, because micro-benchmarks miss inter-kernel cache effects.  Notably, encoder attention is \emph{compute-bound} on H200 (AI above 12.7 ridge) but \emph{bandwidth-bound} on consumer GPUs (ridge $\approx$58.5)---the same kernel has different bottlenecks across architectures.
-
-\textbf{Future work.}
-We would investigate \texttt{torch.compile}, speculative decoding, and INT8/FP8 quantization.
-\textbf{Groupwork} (all contributed kernel implementation and optimization). Ankush: benchmarking, profiling, report. Yash: repo, cluster benchmarks. Meave: report review, audio testing. Majed: nsys profiling, report review.
-
+Autotune found \emph{worse} configs than hand-tuning (micro-benchmarks miss cache effects). Encoder attention is compute-bound on H200 but bandwidth-bound on consumer GPUs.
 \clearpage
 \bibliography{mybib}
 \bibliographystyle{iclr2025_conference}
