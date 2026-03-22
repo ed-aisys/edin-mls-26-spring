@@ -63,7 +63,23 @@ def attention_scores_kernel(
     # Step 4: Store scores
 
     # YOUR CODE HERE
-    pass
+
+    col_idx = tl.arange(0, BLOCK_D)
+    key_idx = tl.arange(0, BLOCK_K)
+
+    q_base = q_ptr + pid_bh * stride_q0 + pid_q * stride_q1
+    q_vec = tl.load(q_base + col_idx * stride_q2, mask=col_idx < head_dim, other=0.0)
+
+    k_base = k_ptr + pid_bh * stride_k0
+    k_mat = tl.load(
+        k_base + key_idx[:, None] * stride_k1 + col_idx[None, :] * stride_k2,
+        mask=(key_idx[:, None] < seq_k) & (col_idx[None, :] < head_dim),
+        other=0.0,
+    )
+
+    dot = tl.sum(k_mat * q_vec[None, :], axis=1)
+    s_base = scores_ptr + pid_bh * stride_s0 + pid_q * stride_s1
+    tl.store(s_base + key_idx * stride_s2, dot * scale, mask=key_idx < seq_k)
 
 
 @triton.jit
@@ -84,7 +100,14 @@ def softmax_inplace_kernel(scores_ptr, stride_s, seq_k, BLOCK_SIZE: tl.constexpr
     # Step 4: Store back
 
     # YOUR CODE HERE
-    pass
+
+    col_idx = tl.arange(0, BLOCK_SIZE)
+    valid = col_idx < seq_k
+    row_ptr = scores_ptr + row * stride_s
+    x = tl.load(row_ptr + col_idx, mask=valid, other=-float("inf"))
+    x = x - tl.max(x, axis=0)
+    numerator = tl.exp(x)
+    tl.store(row_ptr + col_idx, numerator / tl.sum(numerator, axis=0), mask=valid)
 
 
 @triton.jit
@@ -123,7 +146,23 @@ def attention_output_kernel(
     # Step 4: Store output
 
     # YOUR CODE HERE
-    pass
+
+    key_idx = tl.arange(0, BLOCK_K)
+    col_idx = tl.arange(0, BLOCK_D)
+
+    w_base = attn_ptr + pid_bh * stride_w0 + pid_q * stride_w1
+    weights = tl.load(w_base + key_idx * stride_w2, mask=key_idx < seq_k, other=0.0)
+
+    v_base = v_ptr + pid_bh * stride_v0
+    val_mat = tl.load(
+        v_base + key_idx[:, None] * stride_v1 + col_idx[None, :] * stride_v2,
+        mask=(key_idx[:, None] < seq_k) & (col_idx[None, :] < head_dim),
+        other=0.0,
+    )
+
+    result = tl.sum(val_mat * weights[:, None], axis=0)
+    o_base = output_ptr + pid_bh * stride_o0 + pid_q * stride_o1
+    tl.store(o_base + col_idx * stride_o2, result, mask=col_idx < head_dim)
 
 
 @triton.jit

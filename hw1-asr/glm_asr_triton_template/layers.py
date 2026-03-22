@@ -14,6 +14,10 @@ import torch
 import triton
 import triton.language as tl
 
+# GELU element-wise kernel launch (tune with ../benchmark_tile_sizes.py, then set here)
+GELU_BLOCK_SIZE = 1024
+GELU_NUM_WARPS = 4
+
 
 # ============================================================================
 # Helper Functions
@@ -68,9 +72,16 @@ def rmsnorm_kernel(
     # Step 2: Compute variance = mean(x^2)
     # Step 3: Normalize: x / sqrt(variance + eps)
     # Step 4: Apply weight and store
-
     # YOUR CODE HERE
-    pass
+    offs = tl.arange(0, BLOCK_SIZE)
+    mask = offs < hidden_size
+    x = tl.load(x_ptr + pid * stride_x + offs, mask=mask, other=0.0)
+    w = tl.load(w_ptr + offs, mask=mask, other=0.0)
+    x_f32 = x.to(tl.float32)
+    variance = tl.sum(x_f32 * x_f32, axis=0) / hidden_size
+    rnorm = x_f32 * tl.rsqrt(variance + eps)
+    y = rnorm * w
+    tl.store(y_ptr + pid * stride_y + offs, y, mask=mask)
 
 
 @triton.jit
@@ -105,8 +116,18 @@ def layernorm_kernel(
     # Step 5: Normalize and apply affine transform
 
     # YOUR CODE HERE
-    pass
-
+    offs = tl.arange(0,BLOCK_SIZE)
+    mask = offs < hidden_size
+    x = tl.load(x_ptr + pid * stride_x + offs, mask = mask, other = 0.0)
+    w = tl.load(w_ptr + offs, mask = mask, other = 0.0)
+    b = tl.load(b_ptr + offs, mask = mask, other = 0.0)
+    x_f32 = x.to(tl.float32)
+    x_mean = tl.sum(x_f32,axis=0) / hidden_size
+    x_centered = x_f32 - x_mean
+    x_var = tl.sum(x_centered * x_centered, axis=0) / hidden_size
+    x_norm = x_centered * tl.rsqrt(x_var + eps)
+    y = x_norm * w + b
+    tl.store(y_ptr + pid * stride_y + offs, y, mask=mask)
 
 @triton.jit
 def gelu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
@@ -124,9 +145,18 @@ def gelu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     # Step 1: Load input tile
     # Step 2: Compute tanh approximation
     # Step 3: Store output
+    
+    offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offs < n_elements
+    x = tl.load(x_ptr + offs, mask=mask, other=0.0)
+    x_f32 = x.to(tl.float32)
+    #sqrt(2/pi) =0.7978845608
+    inner = tl.sqrt(2.0 / math.pi) * (x_f32 + 0.044715 * x_f32 * x_f32 * x_f32)
+    # tl.libdevice.tanh(inner) didn't work so change it to tl.extra.cuda.libdevice.tanh(inner) like in the working example
+    y = 0.5 * x_f32 * (1.0 + tl.extra.cuda.libdevice.tanh(inner))
+    tl.store(y_ptr + offs, y, mask=mask)
+    
 
-    # YOUR CODE HERE
-    pass
 
 
 @triton.jit
@@ -146,8 +176,14 @@ def silu_kernel(x_ptr, y_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     # Step 2: Compute sigmoid
     # Step 3: Multiply and store
 
-    # YOUR CODE HERE
-    pass
+    offs = pid * BLOCK_SIZE + tl.arange(0,BLOCK_SIZE)
+    mask = offs < n_elements
+    x = tl.load(x_ptr + offs, mask = mask, other = 0.0)
+    x_f32 = x.to(tl.float32)
+    sigmoid = 1.0 / (1.0 + tl.exp(-x_f32))
+    y = x_f32 * sigmoid
+    tl.store(y_ptr + offs, y, mask = mask)
+    
 
 
 @triton.jit
@@ -188,7 +224,26 @@ def linear_kernel_tf32(
     # Step 3: Store the result
 
     # YOUR CODE HERE
-    pass
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, BLOCK_K)
+
+    a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
+    b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k in range(0, K, BLOCK_K):
+        mask_a = (offs_m[:, None] < M) & ((k + offs_k[None, :]) < K)
+        mask_b = ((k + offs_k[:, None]) < K) & (offs_n[None, :] < N)
+        a = tl.load(a_ptrs, mask=mask_a, other=0.0)
+        b = tl.load(b_ptrs, mask=mask_b, other=0.0)
+        acc += tl.dot(a, b)
+        a_ptrs += BLOCK_K * stride_ak
+        b_ptrs += BLOCK_K * stride_bk
+
+    mask_c = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+    c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
+    tl.store(c_ptrs, acc, mask=mask_c)
 
 
 @triton.jit
@@ -347,9 +402,14 @@ def softmax_kernel(x_ptr, y_ptr, stride_x, stride_y, n_cols, BLOCK_SIZE: tl.cons
     # Step 2: Subtract max for stability
     # Step 3: Compute exp and normalize
     # Step 4: Store output
-
     # YOUR CODE HERE
-    pass
+    offs = tl.arange(0, BLOCK_SIZE)
+    mask = offs < n_cols
+    x = tl.load(x_ptr + row * stride_x + offs, mask=mask, other=-float("inf"))
+    x -= tl.max(x, axis=0) # For numerical stability
+    exp_x = tl.exp(x)
+    y = exp_x / tl.sum(exp_x, axis=0)
+    tl.store(y_ptr + row * stride_y + offs, y, mask=mask)
 
 
 @triton.jit
@@ -597,14 +657,20 @@ def gelu(x: torch.Tensor) -> torch.Tensor:
     """GELU activation using Triton."""
     original_shape = x.shape
     total = int(np.prod(x.shape))
-    block = 256
+    block = GELU_BLOCK_SIZE
 
     x_flat = x.reshape(-1).contiguous().to(torch.float32)
     output = torch.empty_like(x_flat)
     grid = (triton.cdiv(total, block),)
 
     if x.is_cuda:
-        gelu_kernel[grid](x_flat, output, total, BLOCK_SIZE=block)
+        gelu_kernel[grid](
+            x_flat,
+            output,
+            total,
+            BLOCK_SIZE=block,
+            num_warps=GELU_NUM_WARPS,
+        )
         return output[:total].reshape(original_shape).to(x.dtype)
 
     return torch.nn.functional.gelu(x)
@@ -614,7 +680,7 @@ def silu(x: torch.Tensor) -> torch.Tensor:
     """SiLU activation using Triton."""
     original_shape = x.shape
     total = int(np.prod(x.shape))
-    block = 256
+    block = 1024
 
     x_flat = x.reshape(-1).contiguous().to(torch.float32)
     output = torch.empty_like(x_flat)
@@ -641,6 +707,8 @@ class Linear:
     TILE_M = 64
     TILE_N = 64
     TILE_K = 32
+    NUM_WARPS = 4
+    NUM_STAGES = 3
 
     BACKEND = "torch"
 
@@ -757,6 +825,8 @@ class Linear:
             BLOCK_M=self.TILE_M,
             BLOCK_N=self.TILE_N,
             BLOCK_K=self.TILE_K,
+            num_warps=self.NUM_WARPS,
+            num_stages=self.NUM_STAGES,
         )
 
         output = output[:M, :N]
@@ -846,7 +916,9 @@ class MLP:
     """MLP with SwiGLU gating using Triton."""
 
     FUSED = True
-    TILE_M, TILE_N, TILE_K = 64, 64, 32
+    TILE_M, TILE_N, TILE_K = 32, 64, 32
+    NUM_WARPS = 4
+    NUM_STAGES = 2
 
     def __init__(
         self,
@@ -960,6 +1032,8 @@ class MLP:
             BLOCK_M=self.TILE_M,
             BLOCK_N=self.TILE_N,
             BLOCK_K=self.TILE_K,
+            num_warps=self.NUM_WARPS,
+            num_stages=self.NUM_STAGES,
         )
 
         if M != M_pad or N != N_pad:
@@ -973,7 +1047,9 @@ class EncoderMLP:
     """Encoder MLP (no gating) using Triton."""
 
     FUSED = True
-    TILE_M, TILE_N, TILE_K = 64, 64, 32
+    TILE_M, TILE_N, TILE_K = 128, 64, 32
+    NUM_WARPS = 4
+    NUM_STAGES = 3
 
     def __init__(
         self,
@@ -1063,6 +1139,8 @@ class EncoderMLP:
             BLOCK_M=self.TILE_M,
             BLOCK_N=self.TILE_N,
             BLOCK_K=self.TILE_K,
+            num_warps=self.NUM_WARPS,
+            num_stages=self.NUM_STAGES,
         )
 
         if M != M_pad or N != N_pad:
