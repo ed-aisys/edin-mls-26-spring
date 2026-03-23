@@ -53,6 +53,9 @@ def attention_scores_kernel(
     pid_bh = tl.program_id(0)
     pid_q = tl.program_id(1)
 
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_d = tl.arange(0, BLOCK_D)
+
     # ============================================================================
     # TODO: Implement attention score computation
     # ============================================================================
@@ -63,7 +66,28 @@ def attention_scores_kernel(
     # Step 4: Store scores
 
     # YOUR CODE HERE
-    pass
+    q = tl.load(
+        q_ptr + pid_bh * stride_q0 + pid_q * stride_q1 + offs_d * stride_q2,
+        mask=offs_d < head_dim,
+        other=0.0,
+    )
+    k = tl.load(
+        k_ptr
+        + pid_bh * stride_k0
+        + offs_k[:, None] * stride_k1
+        + offs_d[None, :] * stride_k2,
+        mask=(offs_k[:, None] < seq_k) & (offs_d[None, :] < head_dim),
+        other=0.0,
+    )
+    scores = tl.sum(k * q[None, :], axis=1) * scale
+    tl.store(
+        scores_ptr
+        + pid_bh * stride_s0
+        + pid_q * stride_s1
+        + offs_k * stride_s2,
+        scores,
+        mask=offs_k < seq_k,
+    )
 
 
 @triton.jit
@@ -73,6 +97,8 @@ def softmax_inplace_kernel(scores_ptr, stride_s, seq_k, BLOCK_SIZE: tl.constexpr
     Grid: (batch_heads * seq_q,)
     """
     row = tl.program_id(0)
+    offs = tl.arange(0, BLOCK_SIZE)
+    mask = offs < seq_k
 
     # ============================================================================
     # TODO: Implement softmax
@@ -84,7 +110,13 @@ def softmax_inplace_kernel(scores_ptr, stride_s, seq_k, BLOCK_SIZE: tl.constexpr
     # Step 4: Store back
 
     # YOUR CODE HERE
-    pass
+    s = tl.load(scores_ptr + row * stride_s + offs, mask=mask, other=-float("inf"))
+    s = s - tl.max(s, axis=0)
+    exp_s = tl.exp(s)
+    denom = tl.sum(exp_s, axis=0)
+    out = exp_s / denom
+
+    tl.store(scores_ptr + row * stride_s + offs, out, mask=mask)
 
 
 @triton.jit
@@ -113,6 +145,9 @@ def attention_output_kernel(
     pid_bh = tl.program_id(0)
     pid_q = tl.program_id(1)
 
+    offs_k = tl.arange(0, BLOCK_K)
+    offs_d = tl.arange(0, BLOCK_D)
+
     # ============================================================================
     # TODO: Implement attention output computation
     # ============================================================================
@@ -123,7 +158,31 @@ def attention_output_kernel(
     # Step 4: Store output
 
     # YOUR CODE HERE
-    pass
+    w = tl.load(
+        attn_ptr
+        + pid_bh * stride_w0
+        + pid_q * stride_w1
+        + offs_k * stride_w2,
+        mask=offs_k < seq_k,
+        other=0.0,
+    )
+    v = tl.load(
+        v_ptr
+        + pid_bh * stride_v0
+        + offs_k[:, None] * stride_v1
+        + offs_d[None, :] * stride_v2,
+        mask=(offs_k[:, None] < seq_k) & (offs_d[None, :] < head_dim),
+        other=0.0,
+    )
+    out = tl.sum(v * w[:, None], axis=0)
+    tl.store(
+        output_ptr
+        + pid_bh * stride_o0
+        + pid_q * stride_o1
+        + offs_d * stride_o2,
+        out,
+        mask=offs_d < head_dim,
+    )
 
 
 @triton.jit
