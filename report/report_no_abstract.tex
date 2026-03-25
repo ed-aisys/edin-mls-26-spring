@@ -115,7 +115,7 @@ We employ a performance-budgeting technique to attribute latency to each stage a
 Converts raw 16\,kHz audio to 128-bin Mel features and downsamples 4$\times$ via strided 1D convolutions.  These are PyTorch built-in operations (read-only \texttt{conv.py}), which we do not modify.  The phase is bandwidth-bound due to large feature maps with simple arithmetic.
 
 \textbf{Phase~2: Audio Encoder (32 layers).}
-Each layer applies LayerNorm, self-attention (20 heads, $d_k$=64), and a two-layer multi-layer perceptron (MLP) with GELU activation.  Rotary Position Embedding (RoPE)~\citep{su2024roformer} is applied to 50\% of head dimensions (the first 32 of 64 are rotated, as specified by the model architecture).  On the H200, encoder attention performs $\sim$20--40 floating-point operations per byte of memory traffic (its arithmetic intensity, or AI), exceeding the GPU's ridge point---the threshold where compute and memory bandwidth are equally limiting (Section~\ref{sec:bottleneck}).  This makes encoder attention compute-bound (limited by arithmetic throughput) on the H200, but bandwidth-bound (limited by memory transfer speed) on consumer GPUs with higher ridge points.  The linear projections ($1280 \times 5120$) are compute-bound on all architectures.
+Each layer applies LayerNorm, self-attention (20 heads, $d_k$=64), and a two-layer multi-layer perceptron (MLP) with GELU activation.  Rotary Position Embedding (RoPE)~\citep{su2024roformer} is applied to 50\% of head dimensions (the first 32 of 64 are rotated, as specified by the model architecture).  On the H200, our flash attention kernel achieves an AI of $\sim$112 for encoder attention (Section~\ref{sec:bottleneck}), well above the GPU's ridge point---the threshold where compute and memory bandwidth are equally limiting.  This makes encoder attention compute-bound (limited by arithmetic throughput) on the H200, but a naive 3-kernel implementation (AI$\sim$16) would be bandwidth-bound on consumer GPUs with higher ridge points.  The linear projections ($1280 \times 5120$) are compute-bound on all architectures.
 
 \textbf{Phase~3: Multi-modal Projector.}
 Pools 4 encoder frames and projects $5120 \to 4096 \to 2048$ through two linear layers with GELU.  This is a small, latency-dominated phase (7.2\,ms on H200, 0.6\% of total).
@@ -223,7 +223,7 @@ Decoder decode consumes over half of total time (50.8\%) even with our optimized
 
 \subsection{Compute-Bound vs Memory-Bound Classification}
 
-We classify each kernel using the roofline model~\citep{williams2009roofline}, which plots achievable throughput against AI to produce a roof-shaped curve: a sloped bandwidth-limited region meeting a flat compute-limited ceiling.  The ridge point where they meet equals peak FLOPS divided by peak bandwidth.
+We classify each kernel using the roofline model~\citep{williams2009roofline}, which plots achievable throughput against AI to produce a roof-shaped curve: a sloped bandwidth-limited region meeting a flat compute-limited ceiling.  The ridge point where they meet equals peak FLOPS divided by peak bandwidth.  We compute AI analytically from tensor dimensions and algorithm structure (FLOP counts from matrix multiply sizes, DRAM bytes from tensor shapes in fp16).  Hardware profiling via Nsight Compute was attempted but restricted by cluster permissions.
 
 For the H200 MIG~3g.71gb, the full GPU has 132 SMs at $\sim$67\,TFLOPS FP32. Our 60-SM partition achieves $(60/132) \times 67 \approx 30.5$\,TFLOPS.  The partition receives 4 of 8 HBM3e memory slices, giving $(4/8) \times 4.8 \approx 2.4$\,TB/s.  The ridge point is:
 \begin{equation}
@@ -240,18 +240,18 @@ Operations with AI $<$ 12.7 are bandwidth-bound. Those above are compute-bound.
 \toprule
 \textbf{Operation} & \textbf{AI (FLOP/B)} & \textbf{Classification} & \textbf{Rationale} \\
 \midrule
-GELU / SiLU & $\sim$2--4 & Bandwidth & 1 load + 1 store, few FLOPs \\
-RMSNorm / LN & $\sim$4--8 & Bandwidth & Reduction + normalize \\
-Flash Attn (enc) & $\sim$20--40 & \textbf{Compute} & Above ridge on H200 \\
-Flash Attn (dec) & $\sim$5--10 & Bandwidth & seq\_q=1, dominated by KV read \\
-Linear (cuBLAS) & $\sim$100--200 & Compute & Large GEMM, high reuse \\
-Fused SwiGLU & $\sim$80--150 & Compute & Two GEMMs fused \\
-RoPE & $\sim$3--5 & Bandwidth & Load, rotate, store \\
+GELU / SiLU & $\sim$2.5 & Bandwidth & 10 FLOPs / 4 bytes per elem \\
+RMSNorm / LN & $\sim$4--8 & Bandwidth & Reduction + scale over D dims \\
+Flash Attn (enc, $N$=750) & $\sim$112 & \textbf{Compute} & Score matrix in SRAM, not DRAM \\
+Flash Attn (dec, $N_q$=1) & $\sim$1.0 & Bandwidth & Full KV cache read, 1 query row \\
+Linear (cuBLAS) & $\sim$170--360 & Compute & $2MKN$ FLOPs, high data reuse \\
+Fused SwiGLU & $\sim$197 & Compute & Two GEMMs, input loaded once \\
+RoPE & $\sim$0.5 & Bandwidth & 6 FLOPs / 12 bytes per elem \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-A notable consequence of the H200's high bandwidth-to-compute ratio is that encoder attention (AI~$\sim$20--40) crosses the ridge point and becomes \emph{compute-bound}, unlike on consumer GPUs such as the RTX~5090 (ridge~$\approx$58.5) where it remains bandwidth-bound.  This means the H200 benefits more from larger attention tiles (128$\times$128 vs.\ 64$\times$64) that increase compute utilization, while the RTX~5090 benefits more from the fp16 pipeline that reduces memory traffic.
+Flash attention dramatically increases encoder attention AI from $\sim$16 (3-kernel pipeline, which materializes the score matrix) to $\sim$112 (fused, score matrix stays in SRAM).  Both are compute-bound on the H200 (ridge=12.7), but on consumer GPUs (RTX~5090, ridge$\approx$58.5) the 3-kernel pipeline would be bandwidth-bound while flash attention remains compute-bound.  Decode-time attention (AI$\sim$1.0) is bandwidth-bound on all architectures due to the single-row query against the full KV cache.
 
 \subsection{Overall Bottleneck}
 
