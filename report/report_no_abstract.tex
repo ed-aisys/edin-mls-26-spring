@@ -362,7 +362,7 @@ On the H200, MLP fusion contributes only $-$0.7\,ms (Table~\ref{tab:ablation}), 
 
 Causal masking is handled via a compile-time \texttt{IS\_CAUSAL} flag that skips tiles entirely above the diagonal, avoiding wasted computation.  For single-token KV-cached decode (\texttt{seq\_q} $\leq$ 4), we fall back to PyTorch's \texttt{scaled\_dot\_product\_attention}, which has lower launch overhead for this degenerate case.
 
-\textbf{Result:} On the H200, we compared our flash attention kernel against PyTorch's built-in SDPA by routing all attention through SDPA.  With KV-cached decoding (seq\_q=1), SDPA is $\sim$9\,ms faster ($\sim$212\,ms vs.\ $\sim$221\,ms) because PyTorch's cuDNN attention backend is highly optimized for single-row queries.  This is why we use the SDPA fallback for \texttt{seq\_q}$\leq$4 (Table~\ref{tab:ablation}: +3.4\,ms when disabled).  Flash attention's advantage lies in the encoder and prefill phases, where large sequences ($\sim$750 tokens) would otherwise require materializing the full score matrix.
+\textbf{Result:} A direct comparison against the original 3-kernel pipeline is not feasible because the upstream attention dispatch is incompatible with our GQA head expansion.  We instead compare against PyTorch SDPA by routing all attention through it: with KV-cached decoding (seq\_q=1), SDPA is $\sim$9\,ms faster ($\sim$212 vs.\ $\sim$221\,ms) due to cuDNN's optimized single-row backend. This is why we use SDPA fallback for \texttt{seq\_q}$\leq$4 (Table~\ref{tab:ablation}: +3.4\,ms when disabled).  Flash attention's advantage is in the encoder and prefill, where large sequences ($\sim$750 tokens) would otherwise materialize the full score matrix.
 
 \subsection{Other Optimizations}
 
