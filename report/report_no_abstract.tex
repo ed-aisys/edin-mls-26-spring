@@ -321,18 +321,19 @@ Figure~\ref{fig:progression} summarizes the cumulative impact.
 \textbf{Result:} Initially, we used Triton's built-in \texttt{@triton.autotune} to select optimal tile configurations at runtime.  However, when tested, the autotune system selected $\texttt{BLOCK\_M}$=16 as optimal in micro-benchmarks, but the full-pipeline benchmark showed \textbf{101.6\,ms vs.\ 98.5\,ms} for our hand-tuned 64$\times$64 configuration---a 3.1\,ms regression.  We determined that the micro-benchmark methodology is too unreliable to capture full-pipeline cache effects.
 In response, we developed a \texttt{GPUProfile} (\texttt{layers.py:89}) system with pre-tested configurations stored in \texttt{\_KNOWN\_CONFIGS} (\texttt{layers.py:23}). Unknown GPUs use dynamic computation largest-to-smallest against the shared memory budget.
 
-We validated these choices through a 22-configuration ablation study on the H200 (Table~\ref{tab:ablation}), testing each parameter in isolation.  The study confirmed that double-buffering and 8 warps are each worth $\sim$12\,ms, while the fp16 pipeline---the largest win on RTX~5090---contributes only +1.5\,ms on the H200, reflecting HBM3e's superior bandwidth.
+We validated these choices through ablation testing on the H200 (Table~\ref{tab:ablation}), confirming that double-buffering and 8 warps are each worth $\sim$12\,ms, while fp16 contributes only +1.5\,ms on H200 (vs.\ $-$11.5\,ms on RTX~5090).
 
 \begin{table}[h]
 \centering
-\caption{H200 ablation: top-impact parameter changes (baseline: 205.2\,ms).}
+\caption{H200 ablation: top-impact parameter changes (baseline: 205.2\,ms).  $^\dagger$Uses origin/main 3-kernel pipeline + stock $O(n^2)$ generation (no KV cache).}
 \label{tab:ablation}
 \small
 \begin{tabular}{@{}lrrl@{}}
 \toprule
 \textbf{Change} & \textbf{Time (ms)} & \textbf{$\Delta$} & \textbf{Insight} \\
 \midrule
-Disable fused RoPE & 234.1 & +28.9 & Most impactful single kernel \\
+3-kernel attention$^\dagger$ & 1808.2 & +1603 & Flash attn 8.5$\times$ faster \\
+Disable fused RoPE & 234.1 & +28.9 & Most impactful fused kernel \\
 \texttt{num\_stages}=1 & 217.4 & +12.2 & Double-buffering essential \\
 \texttt{num\_warps}=4 & 217.2 & +12.0 & 128$\times$128 needs 8 warps \\
 Decoder attn 32$\times$32 & 212.8 & +7.6 & Small tiles hurt \\
@@ -471,11 +472,8 @@ Ablation testing (Table~\ref{tab:ablation}) revealed that fused RoPE (+28.9\,ms 
 (4)~Testing each kernel independently is straightforward; however, problems arise when kernels are composed in the full pipeline, as cache interactions between adjacent kernels produce behaviors not visible in isolated benchmarks.
 
 \textbf{Surprising findings.}
-The autotune system found \emph{worse} configurations than hand-tuning, because micro-benchmarks miss inter-kernel cache effects.  Notably, encoder attention is \emph{compute-bound} on H200 (AI above 12.7 ridge) but \emph{bandwidth-bound} on consumer GPUs (ridge $\approx$58.5)---the same kernel has different bottlenecks across architectures.
-
-\textbf{Future work.}
-We would investigate \texttt{torch.compile} for automatic fusion, speculative decoding, and INT8/FP8 quantization.
-The ablation suggests SDPA threshold merits per-architecture tuning (\texttt{seq\_q}$\leq$1 was $-$1.4\,ms better on H200).
+Autotune found \emph{worse} configs than hand-tuning (micro-benchmarks miss cache effects). Encoder attention is compute-bound on H200 but bandwidth-bound on consumer GPUs---the same kernel has different bottlenecks across architectures.
+\textbf{Future work:} \texttt{torch.compile}, speculative decoding, FP8 quantization, and per-architecture SDPA threshold tuning.
 
 \clearpage
 \bibliography{mybib}
