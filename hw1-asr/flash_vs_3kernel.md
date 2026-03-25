@@ -1,64 +1,91 @@
-# Flash Attention vs 3-Kernel Attention: H200 Comparison
+# Flash Attention vs Alternatives: H200 Comparison
 
 **Date:** 2026-03-25
 **GPU:** NVIDIA H200 MIG 3g.71gb (60 SMs, 70GB HBM3e, ~228KB shared memory)
-**Comparison:** Our flash attention kernel vs origin/main's original 3-kernel pipeline
-**Source of 3-kernel code:** `origin/main:hw1-asr/glm_asr_triton_template/attention.py`
-
-The 3-kernel pipeline (`attention_scores_kernel`, `softmax_inplace_kernel`, `attention_output_kernel`) materializes the full N_q × N_k score matrix in VRAM on every attention call. Our flash attention kernel fuses all three into a single pass with online softmax, keeping intermediates in shared memory/registers.
 
 ---
 
-## Student Benchmark (KV-cached, 13 tokens, 3g.71gb)
+## Test Methodology
+
+All tests swap only the attention path while keeping everything else identical (KV cache, fp16 pipeline, fused RoPE, cuBLAS, GPUProfile). The test scripts:
+1. Back up `attention.py`
+2. Modify the attention dispatch (either swap the file or change a single line)
+3. Clear Triton cache, run benchmark
+4. Restore backup
+
+No committed code is changed. The swap is temporary within the SLURM job.
+
+---
+
+## Test 1: Flash Attention vs PyTorch SDPA (clean single-variable ablation)
+
+**Method:** Change `if q.is_cuda and seq_q <= 4:` to `if q.is_cuda:` — forces ALL attention through PyTorch SDPA instead of our flash attention kernel. Everything else (KV cache, fp16, fused RoPE) stays the same.
+
+**Student benchmark (KV-cached, 13 tokens, 5 runs each):**
+
+| Config | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Mean |
+|--------|-------|-------|-------|-------|-------|------|
+| Flash Attention ON | 236.4 | 216.1 | 211.0 | 221.0 | 221.8 | ~221ms |
+| Flash OFF (all SDPA) | 216.6 | 210.8 | 218.6 | 205.9 | 209.3 | ~212ms |
+| **Delta** | | | | | | **~9ms (SDPA faster)** |
+
+100% accuracy on all runs for both configs.
+
+**Finding:** With KV-cached decoding (seq_q=1 per step), PyTorch SDPA is ~9ms faster than our flash attention kernel on H200. This is because:
+- At seq_q=1, there is no score matrix to materialize — both approaches do the same work
+- PyTorch's SDPA is highly optimized for single-row attention on Hopper (uses cuDNN attention backend)
+- Our flash attention kernel has higher launch overhead for this degenerate case
+
+This is why we use the SDPA fallback for seq_q ≤ 4 in production — it handles the KV-cached decode path more efficiently.
+
+---
+
+## Test 2: Flash Attention vs Origin/Main 3-Kernel Pipeline
+
+**Method:** Swap entire `attention.py` from `origin/main` (original 3-kernel pipeline: `attention_scores_kernel`, `softmax_inplace_kernel`, `attention_output_kernel`, `causal_mask_kernel`).
+
+**IMPORTANT:** This test is NOT a clean single-variable comparison. Origin/main's `scaled_dot_product_attention` has a different internal implementation that is not compatible with our GQA head expansion. The test produced **0% accuracy** — the transcription was empty.
+
+**Student benchmark (3 runs):**
 
 | Config | Run 1 | Run 2 | Run 3 |
 |--------|-------|-------|-------|
-| Flash Attention (ours) | 216.1ms (+/- 0.8) | 209.3ms (+/- 0.9) | 212.3ms (+/- 0.6) |
-| 3-Kernel (origin/main) | 1808.2ms (+/- 6.0) | — | — |
+| Flash Attention (ours) | 216.1ms | 209.3ms | 212.3ms |
+| 3-Kernel (origin/main) | 1808.2ms (0% accuracy) | — | — |
 
-**Speedup: 8.5x** (1808ms → 212ms)
+**This result is invalid.** The 1808ms includes broken attention output due to incompatible GQA handling. The 3-kernel code from origin/main cannot simply be dropped into our codebase because:
+- Our code pre-expands KV heads (16Q → 4KV expanded to 16KV) before calling `scaled_dot_product_attention`
+- Origin/main's `scaled_dot_product_attention` expects unexpanded KV heads and has its own class-based expansion
 
-100% accuracy on both.
+**Detailed benchmark (per-component, 1 run each):**
 
----
+| Component | Flash Attention | 3-Kernel (origin/main) |
+|-----------|----------------|----------------------|
+| Audio Encoder | 3007ms | 2282ms |
+| Projector | 10ms | 7ms |
+| Decoder Prefill | 2204ms | 3054ms |
+| Decoder Decode (50 steps) | 7594ms | 23624ms |
+| Total | 12814ms | 28967ms |
 
-## Detailed Benchmark (per-component, 50 decode steps, 3g.71gb)
-
-| Component | Flash Attention | 3-Kernel (origin/main) | Delta |
-|-----------|----------------|----------------------|-------|
-| Audio Encoder | 3007.2ms (23.5%) | 2282.3ms (7.9%) | +724.9ms |
-| Projector | 9.7ms (0.1%) | 7.1ms (0.0%) | +2.6ms |
-| Decoder Prefill | 2203.7ms (17.2%) | 3054.2ms (10.5%) | -850.5ms |
-| **Decoder Decode (50 steps)** | **7593.6ms (59.3%)** | **23623.5ms (81.6%)** | **-16029.9ms** |
-| **Total** | **12814.1ms** | **28967.1ms** | **-16153.0ms** |
-
-**Overall speedup: 2.26x** (28967ms → 12814ms)
-**Decode speedup: 3.11x** (23624ms → 7594ms)
+These numbers should be treated with caution due to the accuracy failure.
 
 ---
 
-## Analysis
+## Summary for Report
 
-### Decoder decode: 3.1x faster with flash attention
-The 3-kernel pipeline materializes the full score matrix in VRAM on every decode step. For a growing sequence (the detailed benchmark uses the stock generation path), step N processes all N tokens, writing an N×N score matrix. Over 50 steps this accumulates massive VRAM traffic. Flash attention eliminates this entirely — intermediates stay in shared memory/registers.
+The cleanest comparison is **Test 1** (flash ON vs all-SDPA):
+- With KV-cached decoding, flash attention is ~9ms slower than PyTorch SDPA on H200
+- This is why we use SDPA fallback for seq_q ≤ 4
+- Flash attention's true benefit is in prefill/encoder (large seq_q) where it avoids materializing the N×N score matrix
 
-### Decoder prefill: flash attention is faster (-850ms)
-During prefill, the full concatenated sequence (~200+ tokens) passes through 28 decoder layers. Flash attention avoids materializing the 200×200 score matrix per layer, saving ~28 × 200 × 200 × 128 × 4 bytes = ~57MB of intermediate traffic per prefill.
-
-### Audio encoder: 3-kernel is faster (-725ms)
-This is surprising. The encoder runs 32 layers with seq_len ~750 and head_dim=64. The 3-kernel pipeline from origin/main may use different tile configs or memory access patterns that happen to be more efficient for the encoder's specific dimensions on H200. Our flash attention tile config (128×128 with nstages=2) may not be optimal for encoder attention — the ablation showed encoder tile changes have small impact (+0.9ms for 64×64), so this difference likely comes from the profiling harness rather than a real architectural advantage.
-
-Note: The detailed benchmark's first run includes Triton compilation time, which inflates encoder numbers. The run-1 compilation cost differs between flash attention (compiling 1 kernel) and 3-kernel (compiling 4 kernels).
-
-### Student benchmark: 8.5x faster
-The student benchmark uses KV-cached generation (13 tokens). The 3-kernel pipeline from origin/main does NOT have KV caching — it uses the stock O(n²) `generate()`. So the 8.5x speedup combines both flash attention AND KV caching benefits.
+The origin/main comparison (Test 2) cannot be used as a clean ablation because the code is incompatible. The 3-kernel pipeline from origin/main was designed for a different attention dispatch flow.
 
 ---
 
 ## Raw Output Files
 
-- `flash_vs_main_2233206.log` — Full SLURM output (student + detailed for both configs)
-- `flash_main_our_result.txt` — Flash attention student benchmark
-- `flash_main_3kernel_result.txt` — 3-kernel student benchmark
-- `flash_main_our_detailed.txt` — Flash attention detailed benchmark
-- `flash_main_3kernel_detailed.txt` — 3-kernel detailed benchmark
+- `flash_ablation_2233215.log` — Test 1: Flash ON vs all-SDPA (clean ablation)
+- `flash_vs_main_2233206.log` — Test 2: Flash vs origin/main (invalid, 0% accuracy)
+- `flash_on_result.txt`, `flash_off_sdpa_result.txt` — Test 1 parsed results
+- `flash_main_our_result.txt`, `flash_main_3kernel_result.txt` — Test 2 parsed results
+- `flash_main_our_detailed.txt`, `flash_main_3kernel_detailed.txt` — Test 2 detailed benchmarks
