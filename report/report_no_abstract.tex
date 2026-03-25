@@ -362,7 +362,7 @@ On the H200, MLP fusion contributes only $-$0.7\,ms (Table~\ref{tab:ablation}), 
 
 Causal masking is handled via a compile-time \texttt{IS\_CAUSAL} flag that skips tiles entirely above the diagonal, avoiding wasted computation.  For single-token KV-cached decode (\texttt{seq\_q} $\leq$ 4), we fall back to PyTorch's \texttt{scaled\_dot\_product\_attention}, which has lower launch overhead for this degenerate case.
 
-\textbf{Result:} On the H200, disabling the SDPA fallback costs +3.4\,ms (Table~\ref{tab:ablation}), confirming the benefit of routing single-token decode to PyTorch's optimized path.
+\textbf{Result:} Compared against the original 3-kernel pipeline on the H200, flash attention reduces decoder decode from 23.6\,s to 7.6\,s (3.1$\times$) and prefill by 850\,ms.  For single-token KV-cached decode (\texttt{seq\_q}$\leq$4), we fall back to PyTorch SDPA, which ablation confirms saves 3.4\,ms (Table~\ref{tab:ablation}).
 
 \subsection{Other Optimizations}
 
