@@ -255,7 +255,7 @@ Flash attention dramatically increases encoder attention AI from $\sim$16 (3-ker
 
 \subsection{Overall Bottleneck}
 
-The dominant bottleneck is \textbf{memory bandwidth during autoregressive decoding}.  Each decode step processes a single-token query against a growing KV cache through 28 decoder layers.  The attention kernel reads the full KV cache (proportional to sequence length) but performs only $O(d)$ FLOPs per cached token---a classic bandwidth-bound pattern with AI~$\sim$5--10, well below the ridge point on \emph{all} GPU architectures.
+The dominant bottleneck is \textbf{memory bandwidth during autoregressive decoding}.  Each decode step processes a single-token query against a growing KV cache through 28 decoder layers.  The attention kernel reads the full KV cache (proportional to sequence length) but performs only $O(d)$ FLOPs per cached token---a classic bandwidth-bound pattern with AI~$\sim$1.0, well below the ridge point on \emph{all} GPU architectures.
 
 Non-kernel overheads are also significant: with $\sim$10 kernel launches per layer $\times$ 28 layers $\times$ 13 decode steps, launch latency ($\sim$5--15\,$\mu$s each) accounts for $\sim$2--5\,ms.  We mitigate this through kernel fusion (Section~\ref{sec:fusion}), which eliminates $\sim$84 launches per inference, and through the SDPA fallback for single-token decoding.
 

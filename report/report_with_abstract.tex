@@ -244,22 +244,22 @@ Operations with AI $<$ 12.7 are bandwidth-bound. Those above are compute-bound.
 \toprule
 \textbf{Operation} & \textbf{AI (FLOP/B)} & \textbf{Classification} & \textbf{Rationale} \\
 \midrule
-GELU / SiLU & $\sim$2--4 & Bandwidth & 1 load + 1 store, few FLOPs \\
+GELU / SiLU & $\sim$2.5 & Bandwidth & 10 FLOPs / 4\,B per element \\
 RMSNorm / LN & $\sim$4--8 & Bandwidth & Reduction + normalize \\
-Flash Attn (enc) & $\sim$20--40 & \textbf{Compute} & Above ridge on H200 \\
-Flash Attn (dec) & $\sim$5--10 & Bandwidth & seq\_q=1, dominated by KV read \\
-Linear (cuBLAS) & $\sim$100--200 & Compute & Large GEMM, high reuse \\
-Fused SwiGLU & $\sim$80--150 & Compute & Two GEMMs fused \\
-RoPE & $\sim$3--5 & Bandwidth & Load, rotate, store \\
+Flash Attn (enc) & $\sim$112 & \textbf{Compute} & Tiled; score matrix stays in SRAM \\
+Flash Attn (dec) & $\sim$1.0 & Bandwidth & seq\_q=1, full KV cache read \\
+Linear (cuBLAS) & $\sim$168--362 & Compute & Large GEMM, high reuse \\
+Fused SwiGLU & $\sim$197 & Compute & Two GEMMs fused, x loaded once \\
+RoPE & $\sim$0.5 & Bandwidth & Load, rotate, store; few FLOPs \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-A notable consequence is that encoder attention (AI~$\sim$20--40) crosses the H200's ridge point and becomes compute-bound, unlike on consumer GPUs (ridge~$\approx$58.5) where it remains bandwidth-bound.  The H200 thus benefits more from larger tiles (128$\times$128) that increase compute utilization.
+A notable consequence is that flash attention's tiling eliminates the full score matrix from DRAM, raising encoder attention AI from $\sim$16 (3-kernel pipeline) to $\sim$112---well above the ridge point on \emph{all} GPUs.  The H200 benefits further from larger tiles (128$\times$128) that increase compute utilization.
 
 \subsection{Overall Bottleneck}
 
-The dominant bottleneck is \textbf{memory bandwidth during autoregressive decoding}.  Each decode step processes a single-token query against a growing KV cache through 28 decoder layers.  The attention kernel reads the full KV cache (proportional to sequence length) but performs only $O(d)$ FLOPs per cached token---a classic bandwidth-bound pattern with AI~$\sim$5--10, well below the ridge point on \emph{all} GPU architectures.
+The dominant bottleneck is \textbf{memory bandwidth during autoregressive decoding}.  Each decode step processes a single-token query against a growing KV cache through 28 decoder layers.  The attention kernel reads the full KV cache (proportional to sequence length) but performs only $O(d)$ FLOPs per cached token---a classic bandwidth-bound pattern with AI~$\sim$1.0, well below the ridge point on \emph{all} GPU architectures.
 
 Non-kernel overheads are also significant: with $\sim$10 kernel launches per layer $\times$ 28 layers $\times$ 13 decode steps, launch latency ($\sim$5--15\,$\mu$s each) accounts for $\sim$2--5\,ms.  We mitigate this through kernel fusion (Section~\ref{sec:fusion}), which eliminates $\sim$84 launches per inference, and through the SDPA fallback for single-token decoding.
 

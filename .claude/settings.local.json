@@ -22,7 +22,10 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "Bash(git remote:*)"
+      "Bash(git remote:*)",
+      "Bash(docker build:*)",
+      "Read(//Users/ankushburman/.claude/**)",
+      "Read(//Users/ankushburman/**)"
     ]
   }
 }
