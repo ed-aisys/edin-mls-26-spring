@@ -1,0 +1,12 @@
+WARNING: Device-side CUDA Event completion trace is currently enabled.
+         This may increase runtime overhead and the likelihood of false
+         dependencies across CUDA Streams. If you wish to avoid this, please
+         disable the feature with --cuda-event-trace=false.
+WARNING: CPU IP/backtrace sampling not supported, disabling.
+Try the 'nsys status --environment' command to learn more.
+
+WARNING: CPU context switch tracing not supported, disabling.
+Try the 'nsys status --environment' command to learn more.
+
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/745 [00:00<?, ?it/s]Loading weights:   9%|▉         | 70/745 [00:00<00:01, 639.97it/s]Loading weights:  18%|█▊        | 134/745 [00:00<00:01, 580.97it/s]Loading weights:  26%|██▌       | 193/745 [00:00<00:01, 467.72it/s]Loading weights:  33%|███▎      | 248/745 [00:00<00:01, 494.49it/s]Loading weights:  41%|████▏     | 308/745 [00:00<00:00, 506.24it/s]Loading weights:  49%|████▉     | 368/745 [00:00<00:00, 523.31it/s]Loading weights:  57%|█████▋    | 422/745 [00:00<00:00, 527.12it/s]Loading weights:  64%|██████▍   | 476/745 [00:00<00:00, 453.58it/s]Loading weights:  70%|███████   | 524/745 [00:01<00:01, 186.60it/s]Loading weights:  75%|███████▌  | 559/745 [00:01<00:01, 169.31it/s]Loading weights:  79%|███████▉  | 588/745 [00:02<00:00, 163.22it/s]Loading weights:  82%|████████▏ | 612/745 [00:02<00:00, 147.70it/s]Loading weights:  85%|████████▍ | 632/745 [00:02<00:00, 147.19it/s]Loading weights:  87%|████████▋ | 651/745 [00:02<00:00, 141.20it/s]Loading weights:  90%|████████▉ | 668/745 [00:02<00:00, 142.46it/s]Loading weights:  92%|█████████▏| 684/745 [00:02<00:00, 140.24it/s]Loading weights:  94%|█████████▍| 700/745 [00:03<00:00, 125.71it/s]Loading weights:  96%|█████████▌| 714/745 [00:03<00:00, 125.63it/s]Loading weights:  98%|█████████▊| 730/745 [00:03<00:00, 123.98it/s]Loading weights: 100%|██████████| 745/745 [00:03<00:00, 223.90it/s]
