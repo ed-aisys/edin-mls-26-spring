@@ -39,9 +39,9 @@
 \newlabel{sec:optimization}{{5}{5}{Optimization Attempts}{section.5}{}}
 \@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Optimization progression (development GPU, RTX~5090). Each bar shows end-to-end latency after applying all optimizations up to that step. Optimizations validated on H200 at 204.8\,ms (Section~\ref {sec:comparison}). Full breakdown in Appendix Table~\ref {tab:progression}.}}{5}{figure.2}\protected@file@percent }
 \newlabel{fig:progression}{{2}{5}{Optimization progression (development GPU, RTX~5090). Each bar shows end-to-end latency after applying all optimizations up to that step. Optimizations validated on H200 at 204.8\,ms (Section~\ref {sec:comparison}). Full breakdown in Appendix Table~\ref {tab:progression}}{figure.2}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Tile/Block Size Tuning}{5}{subsection.5.1}\protected@file@percent }
 \citation{milakov2018online}
 \citation{dao2023flashattention2fasterattentionbetter,ringlein2025anatomy}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Tile/Block Size Tuning}{6}{subsection.5.1}\protected@file@percent }
 \@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces H200 ablation: top-impact parameter changes (baseline: 205.2\,ms).}}{6}{table.5}\protected@file@percent }
 \newlabel{tab:ablation}{{5}{6}{H200 ablation: top-impact parameter changes (baseline: 205.2\,ms)}{table.5}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Kernel Fusion}{6}{subsection.5.2}\protected@file@percent }
@@ -55,8 +55,8 @@
 \@writefile{lot}{\contentsline {table}{\numberline {6}{\ignorespaces End-to-end comparison on H200 MIG~3g.71gb (teaching cluster).}}{7}{table.6}\protected@file@percent }
 \newlabel{tab:comparison}{{6}{7}{End-to-end comparison on H200 MIG~3g.71gb (teaching cluster)}{table.6}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {6.3}Per-Operator Comparison}{7}{subsection.6.3}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {7}{\ignorespaces Per-component comparison (isolated forward passes, 50 decode steps, RTX~5090).}}{7}{table.7}\protected@file@percent }
-\newlabel{tab:peroperator}{{7}{7}{Per-component comparison (isolated forward passes, 50 decode steps, RTX~5090)}{table.7}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {7}{\ignorespaces Per-component comparison (isolated forward passes, 50 decode steps, RTX~5090).}}{8}{table.7}\protected@file@percent }
+\newlabel{tab:peroperator}{{7}{8}{Per-component comparison (isolated forward passes, 50 decode steps, RTX~5090)}{table.7}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {6.4}Root Cause Analysis}{8}{subsection.6.4}\protected@file@percent }
 \@writefile{lot}{\contentsline {table}{\numberline {8}{\ignorespaces Cross-GPU comparison: teaching cluster vs.\ consumer GPU.}}{8}{table.8}\protected@file@percent }
 \newlabel{tab:crossgpu_main}{{8}{8}{Cross-GPU comparison: teaching cluster vs.\ consumer GPU}{table.8}{}}
@@ -72,14 +72,14 @@
 \bibcite{tillet2019triton}{{7}{2019}{{Tillet et~al.}}{{Tillet, Kung, and Cox}}}
 \bibcite{williams2009roofline}{{8}{2009}{{Williams et~al.}}{{Williams, Waterman, and Patterson}}}
 \bibstyle{iclr2025_conference}
-\@writefile{toc}{\contentsline {section}{\numberline {A}Appendix}{9}{appendix.A}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {A.1}Full Optimization Progression}{9}{subsection.A.1}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {9}{\ignorespaces Complete optimization progression (RTX~5090, 3.5\,s audio, 13 tokens).}}{9}{table.9}\protected@file@percent }
-\newlabel{tab:progression}{{9}{9}{Complete optimization progression (RTX~5090, 3.5\,s audio, 13 tokens)}{table.9}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {A.2}Rejected Optimizations}{9}{subsection.A.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {A.3}Code Map}{9}{subsection.A.3}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {10}{\ignorespaces Optimizations tested and rejected with measured results.}}{10}{table.10}\protected@file@percent }
-\newlabel{tab:rejected}{{10}{10}{Optimizations tested and rejected with measured results}{table.10}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {11}{\ignorespaces Key implementation locations in the supplementary code.}}{10}{table.11}\protected@file@percent }
-\newlabel{tab:codemap}{{11}{10}{Key implementation locations in the supplementary code}{table.11}{}}
-\gdef \@abspage@last{10}
+\@writefile{toc}{\contentsline {section}{\numberline {A}Appendix}{10}{appendix.A}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.1}Full Optimization Progression}{10}{subsection.A.1}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {9}{\ignorespaces Complete optimization progression (RTX~5090, 3.5\,s audio, 13 tokens).}}{10}{table.9}\protected@file@percent }
+\newlabel{tab:progression}{{9}{10}{Complete optimization progression (RTX~5090, 3.5\,s audio, 13 tokens)}{table.9}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.2}Rejected Optimizations}{10}{subsection.A.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.3}Code Map}{10}{subsection.A.3}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {10}{\ignorespaces Optimizations tested and rejected with measured results.}}{11}{table.10}\protected@file@percent }
+\newlabel{tab:rejected}{{10}{11}{Optimizations tested and rejected with measured results}{table.10}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {11}{\ignorespaces Key implementation locations in the supplementary code.}}{11}{table.11}\protected@file@percent }
+\newlabel{tab:codemap}{{11}{11}{Key implementation locations in the supplementary code}{table.11}{}}
+\gdef \@abspage@last{11}

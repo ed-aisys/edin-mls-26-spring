@@ -120,7 +120,7 @@ We employed a performance-budgeting technique to attribute latency to each stage
 Converts raw 16\,kHz audio to 128-bin Mel features and downsamples 4$\times$ via strided 1D convolutions.  These are PyTorch built-in operations (read-only \texttt{conv.py}); we do not modify them.  The phase is bandwidth-bound due to large feature maps with simple arithmetic.
 
 \textbf{Phase~2: Audio Encoder (32 layers).}
-Each layer applies LayerNorm, self-attention (20 heads, $d_k$=64), and a two-layer MLP with GELU activation.  RoPE~\citep{su2024roformer} is applied to 50\% of head dimensions.  On the H200, encoder attention (AI~$\sim$20--40) crosses the ridge point and is \emph{compute-bound}, while on consumer GPUs with lower bandwidth-to-compute ratios it remains bandwidth-bound.  The large linear projections ($1280 \times 5120$) are \emph{compute-bound} on all architectures.
+Each layer applies LayerNorm, self-attention (20 heads, $d_k$=64), and a two-layer MLP with GELU activation.  RoPE~\citep{su2024roformer} is applied to 50\% of head dimensions.  On the H200, our flash attention kernel achieves an AI of $\sim$112 for encoder attention (Section~\ref{sec:bottleneck}), well above the GPU's ridge point, making it compute-bound on all architectures.  The linear projections ($1280 \times 5120$) are also compute-bound on all architectures.
 
 \textbf{Phase~3: Multi-modal Projector.}
 Pools 4 encoder frames and projects $5120 \to 4096 \to 2048$ through two linear layers with GELU.  This is a small, latency-dominated phase (7.2\,ms on H200, 0.6\% of total).
