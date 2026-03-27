@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.1)  27 MAR 2026 16:36
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.1)  27 MAR 2026 16:54
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -949,7 +949,7 @@ Package rerunfilecheck Info: File `report_with_abstract.out' has not changed.
 Here is how much of TeX's memory you used:
  32824 strings out of 469006
  767746 string characters out of 5454814
- 1290649 words of memory out of 5000000
+ 1291649 words of memory out of 5000000
  60921 multiletter control sequences out of 15000+600000
  660974 words of font info for 110 fonts, out of 8000000 for 9000
  319 hyphenation exceptions out of 8191
@@ -972,10 +972,10 @@ ts/type1/urw/helvetic/uhvb8a.pfb></usr/local/texlive/2026basic/texmf-dist/fonts
 /type1/urw/times/utmb8a.pfb></usr/local/texlive/2026basic/texmf-dist/fonts/type
 1/urw/times/utmr8a.pfb></usr/local/texlive/2026basic/texmf-dist/fonts/type1/urw
 /times/utmri8a.pfb>
-Output written on report_with_abstract.pdf (11 pages, 237203 bytes).
+Output written on report_with_abstract.pdf (11 pages, 237846 bytes).
 PDF statistics:
- 344 PDF objects out of 1000 (max. 8388607)
- 292 compressed objects within 3 object streams
+ 347 PDF objects out of 1000 (max. 8388607)
+ 295 compressed objects within 3 object streams
  65 named destinations out of 1000 (max. 500000)
  245 words of extra memory for PDF output out of 10000 (max. 10000000)
 

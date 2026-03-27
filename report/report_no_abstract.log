@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.1)  27 MAR 2026 16:36
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.1)  27 MAR 2026 16:54
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -965,10 +965,10 @@ fonts/type1/urw/helvetic/uhvb8a.pfb></usr/local/texlive/2026basic/texmf-dist/fo
 nts/type1/urw/times/utmb8a.pfb></usr/local/texlive/2026basic/texmf-dist/fonts/t
 ype1/urw/times/utmr8a.pfb></usr/local/texlive/2026basic/texmf-dist/fonts/type1/
 urw/times/utmri8a.pfb>
-Output written on report_no_abstract.pdf (11 pages, 246658 bytes).
+Output written on report_no_abstract.pdf (11 pages, 247334 bytes).
 PDF statistics:
- 347 PDF objects out of 1000 (max. 8388607)
- 293 compressed objects within 3 object streams
+ 350 PDF objects out of 1000 (max. 8388607)
+ 296 compressed objects within 3 object streams
  64 named destinations out of 1000 (max. 500000)
  237 words of extra memory for PDF output out of 10000 (max. 10000000)
 

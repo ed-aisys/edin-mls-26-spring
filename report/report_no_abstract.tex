@@ -461,6 +461,8 @@ RTX~5090 (full) & 170 & 32\,GB & 100.4 & 262.2 & 2.61$\times$ \\
 \end{tabular}
 \end{table}
 
+\chglabel\ \chg{The RTX~5090 row in Table~\ref{tab:crossgpu_main} comes from a later confirmation rerun (100.4\,ms vs.\ 262.2\,ms), whereas Appendix Table~\ref{tab:progression} preserves the original development benchmark chain (261.3\,ms $\rightarrow$ 98.5\,ms).  We keep the full progression table on a single coherent benchmark session so that the per-step deltas remain meaningful.}
+
 %======================================================================
 \section{Conclusion}\label{sec:conclusion}
 %======================================================================
@@ -488,7 +490,7 @@ Autotune found \emph{worse} configs than hand-tuning (micro-benchmarks miss cach
 
 \subsection{Full Optimization Progression}
 
-Table~\ref{tab:progression} shows every optimization step with measured timings on the RTX~5090 development GPU.
+\chglabel\ \chg{Table~\ref{tab:progression} shows every optimization step from the original RTX~5090 development benchmark chain.  These step-by-step values are intentionally kept from one session (261.3\,ms baseline to 98.5\,ms final) rather than mixed with the later 100.4\,ms confirmation rerun used in Table~\ref{tab:crossgpu_main}.}
 
 \begin{table}[h]
 \centering
