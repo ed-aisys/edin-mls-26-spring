@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.1)  27 MAR 2026 00:24
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.1)  27 MAR 2026 16:36
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -791,7 +791,7 @@ braryshapes.geometric.code.tex
 File: pgflibraryshapes.geometric.code.tex 2025-08-29 v3.1.11a (3.1.11a)
 ))
 LaTeX Font Info:    Trying to load font information for OT1+ptm on input line 2
-2.
+5.
 
 (/usr/local/texlive/2026basic/texmf-dist/tex/latex/psnfss/ot1ptm.fd
 File: ot1ptm.fd 2001/06/04 font definitions for OT1/ptm.
@@ -803,24 +803,24 @@ File: l3backend-pdftex.def 2025-10-09 L3 backend support: PDF output (pdfTeX)
 ) (./report_no_abstract.aux)
 \openout1 = `report_no_abstract.aux'.
 
-LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 22.
-LaTeX Font Info:    ... okay on input line 22.
-LaTeX Font Info:    Checking defaults for OMS/cmsy/m/n on input line 22.
-LaTeX Font Info:    ... okay on input line 22.
-LaTeX Font Info:    Checking defaults for OT1/cmr/m/n on input line 22.
-LaTeX Font Info:    ... okay on input line 22.
-LaTeX Font Info:    Checking defaults for T1/cmr/m/n on input line 22.
-LaTeX Font Info:    ... okay on input line 22.
-LaTeX Font Info:    Checking defaults for TS1/cmr/m/n on input line 22.
-LaTeX Font Info:    ... okay on input line 22.
-LaTeX Font Info:    Checking defaults for OMX/cmex/m/n on input line 22.
-LaTeX Font Info:    ... okay on input line 22.
-LaTeX Font Info:    Checking defaults for U/cmr/m/n on input line 22.
-LaTeX Font Info:    ... okay on input line 22.
-LaTeX Font Info:    Checking defaults for PD1/pdf/m/n on input line 22.
-LaTeX Font Info:    ... okay on input line 22.
-LaTeX Font Info:    Checking defaults for PU/pdf/m/n on input line 22.
-LaTeX Font Info:    ... okay on input line 22.
+LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 25.
+LaTeX Font Info:    ... okay on input line 25.
+LaTeX Font Info:    Checking defaults for OMS/cmsy/m/n on input line 25.
+LaTeX Font Info:    ... okay on input line 25.
+LaTeX Font Info:    Checking defaults for OT1/cmr/m/n on input line 25.
+LaTeX Font Info:    ... okay on input line 25.
+LaTeX Font Info:    Checking defaults for T1/cmr/m/n on input line 25.
+LaTeX Font Info:    ... okay on input line 25.
+LaTeX Font Info:    Checking defaults for TS1/cmr/m/n on input line 25.
+LaTeX Font Info:    ... okay on input line 25.
+LaTeX Font Info:    Checking defaults for OMX/cmex/m/n on input line 25.
+LaTeX Font Info:    ... okay on input line 25.
+LaTeX Font Info:    Checking defaults for U/cmr/m/n on input line 25.
+LaTeX Font Info:    ... okay on input line 25.
+LaTeX Font Info:    Checking defaults for PD1/pdf/m/n on input line 25.
+LaTeX Font Info:    ... okay on input line 25.
+LaTeX Font Info:    Checking defaults for PU/pdf/m/n on input line 25.
+LaTeX Font Info:    ... okay on input line 25.
 
 (/usr/local/texlive/2026basic/texmf-dist/tex/context/base/mkii/supp-pdf.mkii
 [Loading MPS to PDF converter (version 2006.09.02).]
@@ -846,7 +846,7 @@ Package epstopdf-base Info: Redefining graphics rule for `.eps' on input line 4
 File: epstopdf-sys.cfg 2010/07/13 v1.3 Configuration of (r)epstopdf for TeX Liv
 e
 ))
-Package hyperref Info: Link coloring OFF on input line 22.
+Package hyperref Info: Link coloring OFF on input line 25.
  (./report_no_abstract.out) (./report_no_abstract.out)
 \@outlinefile=\write4
 \openout4 = `report_no_abstract.out'.
@@ -856,23 +856,23 @@ Package pgfplots notification 'compat/show suggested version=true': document ha
 s been generated with the most recent feature set (\pgfplotsset{compat=1.18}).
 
 
-Underfull \hbox (badness 2384) in paragraph at lines 24--24
+Underfull \hbox (badness 2384) in paragraph at lines 27--27
 \OT1/ptm/m/sc/17.28 Flash At-ten-tion, Ker-nel Fu-sion, and fp16
  []
 
-LaTeX Font Info:    Trying to load font information for U+msa on input line 24.
+LaTeX Font Info:    Trying to load font information for U+msa on input line 27.
 
 (/usr/local/texlive/2026basic/texmf-dist/tex/latex/amsfonts/umsa.fd
 File: umsa.fd 2013/01/14 v3.01 AMS symbols A
 )
-LaTeX Font Info:    Trying to load font information for U+msb on input line 24.
+LaTeX Font Info:    Trying to load font information for U+msb on input line 27.
 
 
 (/usr/local/texlive/2026basic/texmf-dist/tex/latex/amsfonts/umsb.fd
 File: umsb.fd 2013/01/14 v3.01 AMS symbols B
 )
-LaTeX Font Info:    Trying to load font information for OT1+pcr on input line 4
-7.
+LaTeX Font Info:    Trying to load font information for OT1+pcr on input line 5
+0.
 
 (/usr/local/texlive/2026basic/texmf-dist/tex/latex/psnfss/ot1pcr.fd
 File: ot1pcr.fd 2001/06/04 font definitions for OT1/pcr.
@@ -887,35 +887,41 @@ LaTeX Warning: `h' float specifier changed to `ht'.
 usr/local/texlive/2026basic/texmf-dist/fonts/enc/dvips/base/8r.enc}
 
 ] [2]
-Underfull \hbox (badness 1817) in paragraph at lines 152--156
+Underfull \hbox (badness 1817) in paragraph at lines 155--159
 \OT1/ptm/m/n/10 orig-i-nal code-base called \OT1/pcr/m/n/10 .float() \OT1/ptm/m
 /n/10 af-ter ev-ery Lin-ear layer ($\OMS/cmsy/m/n/10 ^^X$\OT1/ptm/m/n/10 120 ca
 ll sites), dou-bling
  []
 
 
-Underfull \hbox (badness 3058) in paragraph at lines 152--156
+Underfull \hbox (badness 3058) in paragraph at lines 155--159
 \OT1/ptm/m/n/10 data size. This is re-dun-dant: Tri-ton ker-nels al-ready com-p
 ute in fp32 in-ter-nally via
  []
 
-[3] [4] [5]
-Underfull \hbox (badness 10000) in paragraph at lines 361--362
+[3] [4]
+
+LaTeX Warning: `h' float specifier changed to `ht'.
+
+[5]
+Underfull \hbox (badness 10000) in paragraph at lines 364--365
 []\OT1/ptm/b/n/10 Change: \OT1/ptm/m/n/10 We re-placed the orig-i-nal 3-kernel 
 pipeline (\OT1/pcr/m/n/10 attention[]scores\OT1/ptm/m/n/10 ,
  []
 
 
-Underfull \hbox (badness 3058) in paragraph at lines 361--362
+Underfull \hbox (badness 3058) in paragraph at lines 364--365
 \OT1/pcr/m/n/10 softmax[]inplace\OT1/ptm/m/n/10 , \OT1/pcr/m/n/10 attention[]ou
 tput\OT1/ptm/m/n/10 ) with a sin-gle \OT1/pcr/m/n/10 flash[]attention[]kernel
  []
 
-[6]
+[6] [7]
+Underfull \hbox (badness 3049) in paragraph at lines 436--437
+[][][][][][][] []\OT1/ptm/m/n/10 The iso-lated com-po-nent ta-ble un-der-states
+ the full end-to-end speedup be-cause
+ []
 
-LaTeX Warning: `h' float specifier changed to `ht'.
-
-[7] [8] [9] (./report_no_abstract.bbl)
+[8] [9] (./report_no_abstract.bbl)
 
 LaTeX Warning: `h' float specifier changed to `ht'.
 
@@ -933,10 +939,10 @@ Package rerunfilecheck Info: File `report_no_abstract.out' has not changed.
 (rerunfilecheck)             Checksum: D7C0E9FF5A5A8F69157A81DF817758C3;4180.
  ) 
 Here is how much of TeX's memory you used:
- 32814 strings out of 469006
- 767520 string characters out of 5454814
- 1291645 words of memory out of 5000000
- 60912 multiletter control sequences out of 15000+600000
+ 32818 strings out of 469006
+ 767554 string characters out of 5454814
+ 1291647 words of memory out of 5000000
+ 60916 multiletter control sequences out of 15000+600000
  660974 words of font info for 110 fonts, out of 8000000 for 9000
  319 hyphenation exceptions out of 8191
  84i,12n,94p,869b,2305s stack positions out of 10000i,1000n,20000p,200000b,200000s
@@ -959,7 +965,7 @@ fonts/type1/urw/helvetic/uhvb8a.pfb></usr/local/texlive/2026basic/texmf-dist/fo
 nts/type1/urw/times/utmb8a.pfb></usr/local/texlive/2026basic/texmf-dist/fonts/t
 ype1/urw/times/utmr8a.pfb></usr/local/texlive/2026basic/texmf-dist/fonts/type1/
 urw/times/utmri8a.pfb>
-Output written on report_no_abstract.pdf (11 pages, 244349 bytes).
+Output written on report_no_abstract.pdf (11 pages, 246658 bytes).
 PDF statistics:
  347 PDF objects out of 1000 (max. 8388607)
  293 compressed objects within 3 object streams
