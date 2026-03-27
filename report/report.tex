@@ -18,6 +18,9 @@
 
 \newcommand{\fix}{\marginpar{FIX}}
 \newcommand{\new}{\marginpar{NEW}}
+\newcommand{\chg}[1]{{\color{blue}#1}}
+\newcommand{\chgcell}[1]{\textcolor{blue}{#1}}
+\newcommand{\chglabel}{{\setlength{\fboxsep}{1pt}\colorbox{yellow!45}{\textcolor{red}{\scriptsize CHANGED}}}}
 
 \begin{document}
 \maketitle
@@ -123,13 +126,13 @@ Converts raw 16\,kHz audio to 128-bin Mel features and downsamples 4$\times$ via
 Each layer applies LayerNorm, self-attention (20 heads, $d_k$=64), and a two-layer MLP with GELU activation.  RoPE~\citep{su2024roformer} is applied to 50\% of head dimensions.  On the H200, our flash attention kernel achieves an AI of $\sim$112 for encoder attention (Section~\ref{sec:bottleneck}), well above the GPU's ridge point, making it compute-bound on all architectures.  The linear projections ($1280 \times 5120$) are also compute-bound on all architectures.
 
 \textbf{Phase~3: Multi-modal Projector.}
-Pools 4 encoder frames and projects $5120 \to 4096 \to 2048$ through two linear layers with GELU.  This is a small, latency-dominated phase (7.2\,ms on H200, 0.6\% of total).
+\chglabel\ \chg{Pools 4 encoder frames and projects $5120 \to 4096 \to 2048$ through two linear layers with GELU.  In the warmup-corrected H200 component profile, this phase is very small and latency-dominated (0.14\,ms, $<0.1$\% of the isolated component total).}
 
 \textbf{Phase~4: Text Decoder Prefill (28 layers).}
 Processes the full concatenated sequence (audio embeddings + prompt tokens) through 28 decoder layers with RMSNorm, GQA attention (16 query / 4 KV heads, $d_k$=128), and SwiGLU MLP~\citep{shazeer2020glu}.  Bandwidth-bound for attention; compute-bound for the large linear projections ($2048 \times 5632$).
 
 \textbf{Phase~5: Autoregressive Decoding.}
-Generates tokens one at a time.  With the baseline's $O(n^2)$ \texttt{generate()} function, this phase dominates wall-clock time, as each step reprocesses the full growing sequence from scratch.  Our KV-cached \texttt{generate\_v8b} stores key/value projections for all previous tokens, processing only the new token each step.  This reduces decoding to $O(n)$, bringing the phase down to 50.8\% of total time (from an estimated $>$80\% in the baseline).
+\chglabel\ \chg{Generates tokens one at a time.  With the baseline's $O(n^2)$ \texttt{generate()} function, this phase dominates wall-clock time, as each step reprocesses the full growing sequence from scratch.  Our KV-cached \texttt{generate\_v8b} stores key/value projections for all previous tokens, processing only the new token each step.  In the warmup-corrected component profile, 50 decode steps still dominate the isolated operator total at 92.1\%, while the full end-to-end benchmark confirms that KV caching is essential to reaching 204.8\,ms overall.}
 
 \subsection{Design Choices}
 
@@ -144,7 +147,7 @@ On the H200 ($\sim$228\,KB opt-in shared memory), this allows $128 \times 128$ t
 For matmul, the fused SwiGLU kernel loads three tile buffers (input, gate weight, up weight): $\texttt{TILE\_K} \cdot (\texttt{TILE\_M} + 2 \cdot \texttt{TILE\_N}) \cdot 4 + \text{overhead}$.  H200 uses $128 \times 128 \times 64$; RTX~5090 uses $64 \times 64 \times 32$.
 
 Element-wise kernels (GELU, SiLU, norms) use \texttt{BLOCK\_SIZE}=1024, which saturates memory bandwidth with minimal register pressure.
-In order to best satisfy the correctness requirements while minimizing latency, the configuration that fits within the shared memory constraint and achieves the lowest end-to-end time is selected for each component.
+\chglabel\ \chg{In order to best satisfy the correctness requirements while minimizing latency, we selected configurations that fit the shared-memory budget and performed well in end-to-end testing, while noting that some micro-benchmark optima did not transfer cleanly to the full pipeline.}
 
 \textbf{\texttt{num\_warps} and \texttt{num\_stages}.}
 We use \texttt{num\_warps}=8 for large tiles ($\geq$4096 elements) and 4 otherwise.  More warps hide memory latency but increase register pressure.
@@ -198,28 +201,28 @@ Table~\ref{tab:e2e} summarizes the end-to-end results on the teaching cluster.  
 
 \subsection{Component/Operator-Level Breakdown}
 
-Table~\ref{tab:detailed} shows per-component profiling (averaged over runs 2--5 of \texttt{benchmark\_detailed.py}, which generates 50 tokens using the stock $O(n^2)$ path; run~1 is excluded due to Triton compilation during warmup).
+\chglabel\ \chg{Table~\ref{tab:detailed} shows per-component profiling from \texttt{benchmark\_detailed.py}: isolated forward passes with single-token decode steps (no KV history).  The detailed benchmark uses 1 full warmup benchmark pass discarded and averages 3 measured benchmark passes, with 5 timed runs per component inside each pass.}
 
 \begin{table}[h]
 \centering
-\caption{Component-level profiling (H200 MIG, 50 tokens, stock generate path, runs 2--5).}
+\caption{\chglabel\ \chg{Component-level profiling (H200 MIG, isolated forward passes, 1 warmup benchmark discarded, average of 3 measured benchmark passes).}}
 \label{tab:detailed}
 \small
 \begin{tabular}{@{}lrrr@{}}
 \toprule
 \textbf{Component} & \textbf{Time (ms)} & \textbf{\% Total} & \textbf{Bound} \\
 \midrule
-Audio Encoder (32 layers) & 314.8 & 25.1\% & Mixed \\
-Multi-modal Projector & 7.2 & 0.6\% & Latency \\
-Decoder Prefill (28 layers) & 294.6 & 23.5\% & Mixed \\
-Decoder Decode (50 steps) & 637.2 & 50.8\% & Bandwidth \\
+\chgcell{Audio Encoder (32 layers)} & \chgcell{36.53} & \chgcell{5.8\%} & \chgcell{Mixed} \\
+\chgcell{Multi-modal Projector} & \chgcell{0.14} & \chgcell{0.0\%} & \chgcell{Latency} \\
+\chgcell{Decoder Prefill (28 layers)} & \chgcell{12.97} & \chgcell{2.1\%} & \chgcell{Mixed} \\
+\chgcell{Decoder Decode (50 steps)} & \chgcell{580.45} & \chgcell{92.1\%} & \chgcell{Bandwidth} \\
 \midrule
-\textbf{Total} & \textbf{1253.8} & \textbf{100\%} & \\
+\chgcell{\textbf{Total}} & \chgcell{\textbf{630.09}} & \chgcell{\textbf{100\%}} & \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Decoder decode consumes over half of total time (50.8\%) even with our optimized kernels, at $\sim$0.45\,ms per layer per step, confirming that autoregressive generation remains the primary bottleneck.
+\chglabel\ \chg{Decoder decode now accounts for 92.1\% of the warmup-corrected isolated component total, at $\sim$0.41\,ms per layer per step, confirming that autoregressive generation remains the primary bottleneck even after optimization.}
 
 %======================================================================
 \section{Bottleneck Analysis}\label{sec:bottleneck}
@@ -229,7 +232,7 @@ Decoder decode consumes over half of total time (50.8\%) even with our optimized
 
 We classify each kernel using the roofline model~\citep{williams2009roofline}, which relates arithmetic intensity (AI)---floating-point operations per byte of memory traffic---to peak compute and bandwidth.  For the H200 MIG~3g.71gb partition (60 of 132 SMs), we estimate peak FP32 throughput at $\sim$30.5\,TFLOPS and HBM3e bandwidth at $\sim$2.4\,TB/s (proportional to memory controller allocation).  The ridge point is:
 \begin{equation}
-\text{AI}_{\text{ridge}} = \frac{\text{Peak FLOPS}}{\text{Peak BW}} = \frac{30.5 \times 10^{12}}{2.4 \times 10^{9}} \approx 12.7 \text{\,FLOP/byte}
+\chg{\text{AI}_{\text{ridge}} = \frac{\text{Peak FLOPS}}{\text{Peak BW}} = \frac{30.5 \times 10^{12}}{2.4 \times 10^{12}} \approx 12.7 \text{\,FLOP/byte}}
 \end{equation}
 Operations with AI $<$ 12.7 are bandwidth-bound; those above are compute-bound.
 
@@ -380,23 +383,23 @@ Example baseline & 464.1 & 35.70 & 100\% & 1.00$\times$ \\
 
 \subsection{Per-Operator Comparison}
 
-Table~\ref{tab:peroperator} compares per-component times between our implementation and the baseline, profiled on the RTX~5090 development GPU where baseline component-level data is available (50 tokens, stock $O(n^2)$ generate path).
+\chglabel\ \chg{Table~\ref{tab:peroperator} reports component-level timings on the H200 MIG~3g.71gb partition using \texttt{benchmark\_detailed.py} with one full warmup benchmark pass discarded and three measured benchmark passes averaged (each pass uses 5 timed runs per component).  These are isolated forward passes with 50 decode steps and \emph{no KV history}, so they measure steady-state operator latency rather than the algorithmic benefit of KV-cached generation.}
 
 \begin{table}[h]
 \centering
-\caption{Per-component comparison (50 tokens, stock generate path, RTX~5090).}
+\caption{\chglabel\ \chg{Per-component comparison on H200 MIG~3g.71gb (isolated forward passes, 50 decode steps, 1 warmup benchmark discarded, average of 3 measured benchmark passes).}}
 \label{tab:peroperator}
 \small
 \begin{tabular}{@{}lrrrr@{}}
 \toprule
 \textbf{Component} & \textbf{Ours (ms)} & \textbf{Baseline (ms)} & \textbf{Speedup} \\
 \midrule
-Audio Encoder & 197.4 & 202.1 & 1.02$\times$ \\
-Projector & 3.9 & 4.1 & 1.05$\times$ \\
-Decoder Prefill & 190.7 & 191.6 & 1.00$\times$ \\
-Decoder Decode (50 steps) & 294.0 & 1920.0 & 6.53$\times$ \\
+\chgcell{Audio Encoder} & \chgcell{36.53} & \chgcell{167.02} & \chgcell{4.57$\times$} \\
+\chgcell{Projector} & \chgcell{0.14} & \chgcell{1.11} & \chgcell{7.93$\times$} \\
+\chgcell{Decoder Prefill} & \chgcell{12.97} & \chgcell{20.51} & \chgcell{1.58$\times$} \\
+\chgcell{Decoder Decode (50 steps)} & \chgcell{580.45} & \chgcell{817.09} & \chgcell{1.41$\times$} \\
 \midrule
-Total & 686.0 & 2317.8 & 3.38$\times$ \\
+\chgcell{Total} & \chgcell{630.09} & \chgcell{1005.73} & \chgcell{1.60$\times$} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -405,13 +408,15 @@ Total & 686.0 & 2317.8 & 3.38$\times$ \\
 
 All optimizations preserve full transcription accuracy: fp16 introduces no degradation because internal kernel computation remains in fp32, and KV-cached decoding produces identical token sequences to the stock path.
 
-The \textbf{6.53$\times$} speedup on decoder decode dominates the overall improvement.  From the results of testing and evaluation, this has two root causes:
+\chglabel\ \chg{In the steady-state H200 component profile, our implementation is faster in every stage.  The largest absolute saving comes from decoder decode (817.09\,ms $\to$ 580.45\,ms over 50 steps), while audio encoding and the projector also improve substantially once Triton compilation warmup is removed from the measurement.}
 
-\textbf{1. Flash Attention vs.\ 3-kernel attention.}
-The baseline materializes the full $N_q \times N_k$ score matrix in VRAM ($\sim$2\,MB per head per step).  Our flash attention kernel keeps all intermediates in shared memory/registers, eliminating $\sim$60\,MB of intermediate traffic per layer at encoder sequence lengths.
+\chglabel\ \chg{The isolated component table understates the full end-to-end speedup because \texttt{benchmark\_detailed.py} does not use KV-cached generation.  Table~\ref{tab:comparison}, by contrast, uses the full student benchmark with \texttt{generate\_v8b}.  The end-to-end result therefore benefits from both faster steady-state kernels \emph{and} the algorithmic reduction from quadratic reprocessing to linear-time cached decode.  This explains why the per-component total speedup is 1.60$\times$ while the full H200 pipeline reaches 2.27$\times$.}
 
-\textbf{2. fp16 pipeline.}
-Halving element size from 4 bytes (fp32) to 2 bytes (fp16) directly halves memory traffic for bandwidth-bound operations.  Since the roofline analysis (Table~\ref{tab:ai}) confirms that decode-time attention is bandwidth-bound on \emph{all} architectures (AI well below even the H200's low ridge point of 12.7), this translates nearly linearly to a $\sim$2$\times$ speedup for those kernels.
+\chglabel\ \chg{\textbf{1. Faster steady-state kernels in both encoder and decoder.}
+Flash attention, fused RoPE, fp16 norms, and fused MLP kernels reduce operator time throughout the pipeline.  On H200 this appears as 4.57$\times$ faster audio encoding, 1.58$\times$ faster decoder prefill, and 1.41$\times$ faster decode steps in isolated profiling.}
+
+\chglabel\ \chg{\textbf{2. KV-cached generation in the end-to-end path.}
+The detailed benchmark measures single-step decode without KV history, but the full inference benchmark uses our KV-cached \texttt{generate\_v8b}.  That cached path avoids recomputing attention over the full growing sequence at every token and therefore contributes additional end-to-end speedup beyond the isolated operator table.}
 
 \textbf{Cross-GPU generalization.}
 To verify portability, we evaluated on both the teaching cluster (H200 MIG) and a consumer GPU (RTX~5090).
@@ -444,7 +449,7 @@ The success in meeting the performance objectives is the result of prioritizing 
 \textbf{Key lessons.}
 (1)~The pipeline is overwhelmingly \emph{memory-bandwidth-bound}: halving data types (fp32$\to$fp16) and eliminating intermediate writes (kernel fusion, flash attention) provided the largest gains.
 (2)~Attention is the most challenging kernel to optimize because tile size, shared memory, warp count, and pipeline stages are tightly coupled; the H200's 228\,KB shared memory accommodates 128$\times$128 tiles with double-buffering, while consumer GPUs with $\sim$99\,KB require 64$\times$64 with single-buffering---demonstrating the need for a portable \texttt{GPUProfile} system.
-(3)~Profile before optimizing: our initial assumption that compute-bound matmul was the bottleneck was wrong---decoder decode steps (bandwidth-bound attention + KV reads) consumed 50.8\% of total time on H200 even after optimization.
+\chglabel\ \chg{(3)~Profile before optimizing: our initial assumption that compute-bound matmul was the bottleneck was wrong---decoder decode steps (bandwidth-bound attention + KV reads) still consumed 92.1\% of the warmup-corrected isolated component total on H200 even after optimization.}
 (4)~Testing each functional block independently was simple enough to do; however, problems arose when functional blocks were connected to each other, as cache interactions between adjacent kernels produced behaviors not visible in isolated benchmarks.
 
 \textbf{Surprising findings.}

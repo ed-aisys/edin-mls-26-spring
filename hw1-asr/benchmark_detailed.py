@@ -5,6 +5,7 @@ Measures execution time for each operator/layer in the model.
 
 Usage:
     python benchmark_detailed.py <folder_name>
+    python benchmark_detailed.py <folder_name> --benchmark-repeats 3 --warmup-benchmarks 1
     python benchmark_detailed.py glm_asr_cutile_template --nsys
     python benchmark_detailed.py glm_asr_triton_example
 """
@@ -360,11 +361,88 @@ def detailed_profile_torch(model, input_features, input_ids, input_features_mask
     return results
 
 
+def aggregate_profile_runs(results_list):
+    """Aggregate multiple full benchmark passes after warmup."""
+    aggregated = {}
 
-def print_summary(component_results):
+    for key in ['audio_encoder', 'projector', 'decoder_prefill', 'decode_step']:
+        component_runs = [result[key] for result in results_list if key in result]
+        if not component_runs:
+            continue
+
+        means = np.array([entry['mean'] for entry in component_runs], dtype=np.float64)
+        aggregated[key] = {
+            'mean': float(np.mean(means)),
+            'std': float(np.std(means)),
+            'min': float(np.min(means)),
+            'max': float(np.max(means)),
+        }
+
+    layer_lists = [result.get('layers', []) for result in results_list if result.get('layers')]
+    if layer_lists:
+        num_layers = min(len(layer_list) for layer_list in layer_lists)
+        aggregated['layers'] = []
+        for layer_idx in range(num_layers):
+            layer_name = layer_lists[0][layer_idx]['name']
+            means = np.array(
+                [layer_list[layer_idx]['mean'] for layer_list in layer_lists],
+                dtype=np.float64,
+            )
+            aggregated['layers'].append({
+                'name': layer_name,
+                'mean': float(np.mean(means)),
+                'std': float(np.std(means)),
+            })
+
+    return aggregated
+
+
+def run_profile_repeats(
+    profile_fn,
+    model,
+    input_features,
+    input_ids,
+    input_features_mask,
+    num_runs=3,
+    benchmark_repeats=1,
+    warmup_benchmarks=0,
+):
+    """Run full benchmark passes, discarding warmup passes and aggregating measured passes."""
+    measured_results = []
+    total_passes = warmup_benchmarks + benchmark_repeats
+
+    for pass_idx in range(total_passes):
+        is_warmup = pass_idx < warmup_benchmarks
+        label = "warmup, discarded" if is_warmup else f"measured {len(measured_results) + 1}/{benchmark_repeats}"
+        print("\n" + "=" * 70)
+        print(f"BENCHMARK PASS {pass_idx + 1}/{total_passes} ({label})")
+        print("=" * 70)
+
+        results = profile_fn(
+            model,
+            input_features,
+            input_ids,
+            input_features_mask,
+            num_runs=num_runs,
+        )
+
+        if not is_warmup:
+            measured_results.append(results)
+
+    if not measured_results:
+        raise ValueError("At least one measured benchmark pass is required.")
+
+    if len(measured_results) == 1:
+        return measured_results[0]
+
+    return aggregate_profile_runs(measured_results)
+
+
+
+def print_summary(component_results, title="PERFORMANCE SUMMARY"):
     """Print a summary table of all profiling results."""
     print("\n" + "="*70)
-    print("PERFORMANCE SUMMARY")
+    print(title)
     print("="*70)
 
     print("\n{:<35} {:>12} {:>12}".format("Component", "Time (ms)", "% of Total"))
@@ -431,8 +509,27 @@ def main():
                        help='Folder name to benchmark')
     parser.add_argument('--audio', type=str, help='Path to test audio file')
     parser.add_argument('--runs', type=int, default=3, help='Number of profiling runs')
+    parser.add_argument(
+        '--benchmark-repeats',
+        type=int,
+        default=1,
+        help='Number of full benchmark passes to measure after warmup benchmarks'
+    )
+    parser.add_argument(
+        '--warmup-benchmarks',
+        type=int,
+        default=0,
+        help='Number of full benchmark passes to run and discard before measurement'
+    )
     parser.add_argument('--nsys', action='store_true', help='Run Nsight Systems profiling')
     args = parser.parse_args()
+
+    if args.runs < 1:
+        parser.error('--runs must be at least 1')
+    if args.benchmark_repeats < 1:
+        parser.error('--benchmark-repeats must be at least 1')
+    if args.warmup_benchmarks < 0:
+        parser.error('--warmup-benchmarks cannot be negative')
 
     print("="*70)
     print("GLM-ASR Detailed Operator Profiling")
@@ -487,6 +584,12 @@ def main():
     from weight_loader import load_model_from_hf
     model, processor = load_model_from_hf("zai-org/GLM-ASR-Nano-2512")
 
+    print(
+        f"\nBenchmark configuration: {args.runs} timed runs per component, "
+        f"{args.warmup_benchmarks} warmup benchmark passes, "
+        f"{args.benchmark_repeats} measured benchmark passes"
+    )
+
     if use_torch_backend:
         import torch
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -507,7 +610,16 @@ def main():
         print(f"Input features shape: {input_features.shape}")
         print(f"Input IDs shape: {input_ids.shape}")
 
-        component_results = detailed_profile_torch(model, input_features, input_ids, input_features_mask, num_runs=args.runs)
+        component_results = run_profile_repeats(
+            detailed_profile_torch,
+            model,
+            input_features,
+            input_ids,
+            input_features_mask,
+            num_runs=args.runs,
+            benchmark_repeats=args.benchmark_repeats,
+            warmup_benchmarks=args.warmup_benchmarks,
+        )
     else:
         import cupy as cp
         if hasattr(processor, 'apply_transcription_request'):
@@ -526,10 +638,26 @@ def main():
         print(f"Input features shape: {input_features.shape}")
         print(f"Input IDs shape: {input_ids.shape}")
 
-        component_results = detailed_profile(model, input_features, input_ids, input_features_mask, num_runs=args.runs)
+        component_results = run_profile_repeats(
+            detailed_profile,
+            model,
+            input_features,
+            input_ids,
+            input_features_mask,
+            num_runs=args.runs,
+            benchmark_repeats=args.benchmark_repeats,
+            warmup_benchmarks=args.warmup_benchmarks,
+        )
 
     # Print summary
-    print_summary(component_results)
+    summary_title = "PERFORMANCE SUMMARY"
+    if args.benchmark_repeats > 1 or args.warmup_benchmarks > 0:
+        summary_title = (
+            "AGGREGATED PERFORMANCE SUMMARY "
+            f"({args.benchmark_repeats} measured benchmarks, "
+            f"{args.warmup_benchmarks} warmup discarded)"
+        )
+    print_summary(component_results, title=summary_title)
 
     sys.path.remove(folder_path)
     return 0
