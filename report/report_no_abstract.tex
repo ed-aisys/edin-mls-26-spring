@@ -21,6 +21,15 @@
 \newcommand{\chg}[1]{{\color{blue}#1}}
 \newcommand{\chgcell}[1]{\textcolor{blue}{#1}}
 \newcommand{\chglabel}{{\setlength{\fboxsep}{1pt}\colorbox{yellow!45}{\textcolor{red}{\scriptsize CHANGED}}}}
+\newcommand{\latestchglabel}{{\setlength{\fboxsep}{1pt}\colorbox{yellow!65}{\textcolor{black}{\scriptsize LATEST CHANGE}}}}
+\newcommand{\latestchgblock}[1]{%
+  \begingroup
+  \setlength{\fboxsep}{4pt}%
+  \colorbox{yellow!20}{%
+    \parbox{\dimexpr\linewidth-2\fboxsep\relax}{#1}%
+  }%
+  \endgroup
+}
 
 \begin{document}
 \maketitle
@@ -365,7 +374,9 @@ On the H200, MLP fusion contributes only $-$0.7\,ms (Table~\ref{tab:ablation}), 
 
 Causal masking is handled via a compile-time \texttt{IS\_CAUSAL} flag that skips tiles entirely above the diagonal, avoiding wasted computation.  For single-token KV-cached decode (\texttt{seq\_q} $\leq$ 4), we fall back to PyTorch's \texttt{scaled\_dot\_product\_attention}, which has lower launch overhead for this degenerate case.
 
-\textbf{Result:} A direct comparison against the original 3-kernel pipeline is not feasible because the upstream attention dispatch is incompatible with our GQA head expansion.  We instead compare against PyTorch SDPA by routing all attention through it: with KV-cached decoding (seq\_q=1), SDPA is $\sim$9\,ms faster ($\sim$212 vs.\ $\sim$221\,ms) due to cuDNN's optimized single-row backend. This is why we use SDPA fallback for \texttt{seq\_q}$\leq$4 (Table~\ref{tab:ablation}: +3.4\,ms when disabled).  Flash attention's advantage is in the encoder and prefill, where large sequences ($\sim$750 tokens) would otherwise materialize the full score matrix.
+\textbf{Result:} \latestchglabel
+
+\latestchgblock{We later reintroduced the original 3-kernel path behind \texttt{GLM\_ASR\_ATTENTION\_MODE=three\_kernel} and benchmarked it against the current deployed path (\texttt{auto}: flash kernel for larger \texttt{seq\_q}, SDPA fallback for \texttt{seq\_q}$\leq$4) on the same H200 codebase.  In the warmup-corrected detailed benchmark, the current path reduces isolated component time from 651.51\,ms to 624.98\,ms (1.04$\times$), with lower prefill (13.37$\rightarrow$12.86\,ms) and 50-step decode cost (601.65$\rightarrow$575.64\,ms).  In the paired end-to-end student benchmark from the same job, however, the current path measured 219.8\,ms while the 3-kernel path measured 207.0\,ms.  We therefore treat this experiment as reproducible operator-level evidence rather than as a single universal end-to-end speedup result.  The clean end-to-end justification for keeping the SDPA fallback remains Table~\ref{tab:ablation}: disabling it costs +3.4\,ms.}
 
 \subsection{Other Optimizations}
 
@@ -474,7 +485,7 @@ Ablation testing (Table~\ref{tab:ablation}) revealed that fused RoPE (+28.9\,ms 
 \textbf{Key lessons.}
 (1)~The pipeline is overwhelmingly \emph{memory-bandwidth-bound}: halving data types (fp32$\to$fp16) and eliminating intermediate writes (kernel fusion, flash attention) provided the largest gains.
 (2)~Attention is the most challenging kernel to optimize because tile size, shared memory, warp count, and pipeline stages are tightly coupled; the H200's 228\,KB shared memory accommodates 128$\times$128 tiles with double-buffering, while consumer GPUs with $\sim$99\,KB require 64$\times$64 with single-buffering---demonstrating the need for a portable \texttt{GPUProfile} system.
-\chglabel\ \chg{(3)~Profile before optimizing: our initial assumption that compute-bound matmul is the bottleneck proves wrong---decoder decode steps (bandwidth-bound attention + KV reads) still consume 92.1\% of the warmup-corrected isolated component total on H200 even after optimization.}
+\chglabel\ \chg{(3)~Profile before optimizing: warmup-corrected component profiling confirms that decoder decode, not the compute-heavy linear projections, remains the dominant bottleneck---decode steps (bandwidth-bound attention + KV reads) still consume 92.1\% of the isolated component total on H200 even after optimization.}
 (4)~Testing each kernel independently is straightforward; however, problems arise when kernels are composed in the full pipeline, as cache interactions between adjacent kernels produce behaviors not visible in isolated benchmarks.
 
 \textbf{Surprising findings.}

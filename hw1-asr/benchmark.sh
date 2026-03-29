@@ -1,14 +1,14 @@
 #!/bin/bash
 #
-# Student Version Benchmark Script
-# Usage: ./benchmark.sh <folder_name> [options]
+# Shell wrapper for benchmark_student.py.
+# Canonical benchmark doc mapping is recorded in ../benchmarks/benchmarks_README.md.
 #
+# Usage: ./benchmark.sh <folder_name> [options]
 # Examples:
-#   ./benchmark.sh glm_asr_cutile_template
+#   ./benchmark.sh glm_asr_triton_template
 #   ./benchmark.sh glm_asr_triton_example
-#   ./benchmark.sh glm_asr_scratch
-#   ./benchmark.sh glm_asr_cutile_template --audio /path/to/test.wav
-#   ./benchmark.sh glm_asr_cutile_template --warmup 2 --runs 5
+#   ./benchmark.sh glm_asr_triton_template --warmup 2 --runs 5
+#   ./benchmark.sh glm_asr_triton_template --audio /path/to/test.wav
 #
 
 set -e

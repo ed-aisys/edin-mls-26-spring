@@ -1,4 +1,6 @@
 #!/bin/bash
+# Canonical Section 5.3 source: ../benchmarks/benchmarks_attention.md
+# Raw outputs: attention_mode_runs/flash_vs_three_kernel_<jobid>/...
 #SBATCH --job-name=flash-3kernel
 #SBATCH --partition=Teaching
 #SBATCH --nodelist=saxa

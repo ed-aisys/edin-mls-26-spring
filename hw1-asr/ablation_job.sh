@@ -1,4 +1,6 @@
 #!/bin/bash
+# Canonical output doc: ../benchmarks/benchmarks_ablation.md
+# Generated outputs: ablation_results.json, ablation_results.md, ablation_output.log
 #SBATCH --job-name=ablation
 #SBATCH --partition=Teaching
 #SBATCH --nodelist=saxa

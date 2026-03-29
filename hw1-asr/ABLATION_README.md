@@ -1,5 +1,9 @@
 # Ablation Testing Guide
 
+The canonical report-facing summary for these results now lives in
+`../benchmarks/benchmarks_ablation.md`. This file remains the operator guide for
+running the ablation script itself.
+
 ## Quick Start
 
 ```bash

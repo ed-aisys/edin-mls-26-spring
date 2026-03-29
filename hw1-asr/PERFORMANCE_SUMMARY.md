@@ -1,5 +1,10 @@
 # GLM-ASR Performance Comparison - Summary
 
+> Supplementary multi-audio benchmark only. This file is not the source of
+> record for any number in `report/report_no_abstract.tex`; use
+> `../benchmarks/benchmarks_README.md` and `../benchmarks/benchmark_provenance.md`
+> for canonical report evidence.
+
 ## Executive Summary
 
 | Metric | Example baseline | our template | Speedup |
@@ -135,4 +140,3 @@ Both implementations produce identical, high-quality transcriptions with 100% ac
 - Maintains 100% transcription accuracy
 - Scales exceptionally well with longer sequences
 - Suitable for real-time and batch transcription tasks
-

@@ -2,6 +2,11 @@
 
 Implementation-focused reference for the GLM-ASR speech recognition model optimization. Covers what was chosen, why (with benchmark data), and how it maps to code.
 
+> Benchmark evidence on this cleanup branch is canonicalized under
+> `benchmarks/`. Treat benchmark numbers in this file as design-history context;
+> use `benchmarks/benchmark_provenance.md` to find the source-of-record for any
+> report number.
+
 **Result: 261.3ms baseline to 98.5ms (2.65x speedup) on RTX 5090, 100% accuracy.**
 
 ---
@@ -448,7 +453,11 @@ Handles partial RoPE for encoder (50% rotary factor) via passthrough copy of rem
 | GPU | Our Time | Baseline | Speedup |
 |-----|----------|----------|---------|
 | RTX 5090 (170 SMs) | 100.4ms | 262.2ms | 61.7% |
-| H200 MIG 3g.71gb (60 SMs) | 204.6ms | 464.1ms | 55.9% |
+| H200 MIG 3g.71gb (60 SMs) | 204.6ms (historical) | 464.1ms | 55.9% |
+
+The canonical report number for H200 on this branch is `204.8ms`, backed by the
+five-invocation raw log in `benchmarks/benchmarks.md`. The `204.6ms` value above
+is an older historical note and should not be used for `report_no_abstract.tex`.
 
 ### Cross-branch comparison
 

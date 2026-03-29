@@ -1,0 +1,65 @@
+# Benchmark README
+
+This folder is the canonical entry point for benchmark evidence used by
+`report/report_no_abstract.tex`.
+
+## Canonical Benchmark Docs
+
+| File | Purpose | Evidence Type | Supports |
+|------|---------|---------------|----------|
+| `benchmarks.md` | Final H200 MIG 3g.71gb end-to-end benchmark | Raw log-backed (`logs/h200_e2e_2225992/benchmark_raw_output.txt`) | Headline H200 result, Table `tab:e2e`, Table `tab:comparison`, H200 row of Table `tab:crossgpu_main` |
+| `benchmarks_detailed.md` | Final warmup-corrected H200 component benchmark | Raw log-backed (`logs/h200_detailed_2236079/`) | Table `tab:detailed`, Table `tab:peroperator` |
+| `benchmarks_ablation.md` | H200 ablation benchmark summary | Generated-artifact-backed (`hw1-asr/ablation_results.{json,md}`, `hw1-asr/ablation_output.log`) | Table `tab:ablation`, ablation discussion in Sections 4 and 6 |
+| `benchmarks_5090.md` | RTX 5090 confirmation rerun | Embedded console transcript in doc | RTX 5090 row of Table `tab:crossgpu_main`, headline RTX 5090 number |
+| `benchmarks_history.md` | Original RTX 5090 development benchmark chain | History-backed, extracted from pre-cleanup docs | Appendix Table `tab:progression`, Appendix Table `tab:rejected` |
+| `benchmarks_attention.md` | Section 5.3 attention-backend evidence | Raw log-backed (`logs/h200_attention_2237998/`) | Section 5.3 (`FlashAttention-Style Attention`) |
+| `benchmark_provenance.md` | Report-facing provenance matrix | Consolidated index | All benchmark-backed report claims |
+
+## Raw Artifact Locations
+
+| Path | What It Contains |
+|------|------------------|
+| `../logs/h200_e2e_2225992/benchmark_raw_output.txt` | Raw H200 end-to-end transcript for `glm_asr_triton_template` plus the H200 baseline benchmark |
+| `../logs/h200_detailed_2236079/` | Warmup-corrected H200 detailed benchmark bundle (`job_metadata`, SLURM log, template log, baseline log, parsed summaries) |
+| `../logs/h200_attention_2237998/` | Same-codebase H200 attention-backend comparison bundle for Section 5.3 (`auto` vs `three_kernel`) |
+| `../hw1-asr/ablation_results.json` | Structured H200 ablation results |
+| `../hw1-asr/ablation_results.md` | Human-readable H200 ablation results |
+| `../hw1-asr/ablation_output.log` | Raw console output for the successful H200 ablation run |
+
+## Benchmark Scripts
+
+| Script | Status | What It Measures | Outputs | Canonical Doc |
+|--------|--------|------------------|---------|---------------|
+| `../hw1-asr/benchmark_student.py` | Authoritative | End-to-end inference on a chosen implementation folder | Console transcript only unless wrapped | `benchmarks.md`, `benchmarks_5090.md`, `benchmarks_attention.md` |
+| `../hw1-asr/benchmark.sh` | Wrapper | Shell wrapper for `benchmark_student.py` | Console transcript only unless redirected | Same as `benchmark_student.py` |
+| `../hw1-asr/benchmark_detailed.py` | Authoritative | Isolated component profiling and 50-step decode estimate | Console transcript only unless wrapped | `benchmarks_detailed.md` |
+| `../hw1-asr/benchmark_detailed.sh` | Wrapper | Shell wrapper for `benchmark_detailed.py` | Console transcript only unless redirected | `benchmarks_detailed.md` |
+| `../hw1-asr/benchmark_detailed_job.sh` | Authoritative batch wrapper | H200 detailed/component benchmark with discarded warmup benchmark pass | `benchmark_runs/detailed_<jobid>/...` and parsed summaries | `benchmarks_detailed.md` |
+| `../hw1-asr/ablation_test.py` | Authoritative | H200 ablation study across 22 configurations | `ablation_results.json`, `ablation_results.md`, `ablation_output.log` | `benchmarks_ablation.md` |
+| `../hw1-asr/ablation_job.sh` | Authoritative batch wrapper | Batch execution of `ablation_test.py` on Saxa | `ablation_slurm_<jobid>.{log,err}` plus generated ablation files | `benchmarks_ablation.md` |
+| `../hw1-asr/flash_vs_three_kernel_job.sh` | Authoritative for Section 5.3 | Same-codebase comparison of `GLM_ASR_ATTENTION_MODE=auto` vs `three_kernel` | `attention_mode_runs/flash_vs_three_kernel_<jobid>/...` | `benchmarks_attention.md` |
+| `../hw1-asr/flash_ablation_test.sh` | Historical exploratory | Flash/SDPA ablation on H200 by forcing all attention through SDPA | Local log files inside `hw1-asr/` | Historical note inside `benchmarks_attention.md` |
+| `../hw1-asr/nsys_profile.sh` | Supplementary | Nsight Systems profiling | `.nsys-rep` / `.sqlite` outputs | Not a benchmark source of record |
+| `../hw1-asr/ncu_profile.py` | Supplementary | Nsight Compute profiling | Nsight Compute output | Not a benchmark source of record |
+| `../hw1-asr/ncu_job.sh` | Supplementary | Batch wrapper for Nsight Compute profiling | Batch logs / profiler outputs | Not a benchmark source of record |
+
+## Removed or Superseded Sources
+
+These files were intentionally removed or sidelined during cleanup because they
+duplicated benchmark numbers without being the canonical evidence path:
+
+- old report variants (`report.tex`, `report_with_abstract.tex`)
+- verbose tutorial/reference/code-explained docs
+- exploratory branch-swap flash-vs-main scripts
+- duplicate benchmark-history notes once their numbers were extracted into
+  `benchmarks_history.md`
+
+## How To Look Up A Report Number
+
+1. Find the table or claim in `report/report_no_abstract.tex`.
+2. Open `benchmark_provenance.md`.
+3. Follow the canonical doc link in that row.
+4. If you need the raw artifact, use the raw path listed in the same row.
+
+The rule on this branch is simple: every benchmark number in the report should
+resolve to exactly one canonical benchmark doc and one traceable evidence path.

@@ -1,17 +1,16 @@
 #!/bin/bash
 #
-# Detailed Operator Profiling Script
-# Measures execution time for each operator/layer in the model.
+# Shell wrapper for benchmark_detailed.py.
+# Canonical benchmark doc mapping is recorded in ../benchmarks/benchmarks_README.md.
 #
 # Usage:
-#   ./benchmark_detailed.sh <folder_name>           # Full profiling
-#   ./benchmark_detailed.sh <folder_name> --nsys    # Nsight Systems profile
+#   ./benchmark_detailed.sh <folder_name>
+#   ./benchmark_detailed.sh <folder_name> --runs 5
+#   ./benchmark_detailed.sh <folder_name> --warmup-benchmarks 1 --benchmark-repeats 3
 #
 # Examples:
-#   ./benchmark_detailed.sh glm_asr_cutile_example
-#   ./benchmark_detailed.sh glm_asr_cutile_template --runs 5
-#   ./benchmark_detailed.sh glm_asr_cutile_example --nsys
-#   ./benchmark_detailed.sh glm_asr_triton_example
+#   ./benchmark_detailed.sh glm_asr_triton_template
+#   ./benchmark_detailed.sh glm_asr_triton_example --runs 5
 #
 
 set -e
@@ -25,9 +24,12 @@ show_help() {
     echo ""
     echo "Options:"
     echo "  --audio PATH      Path to test audio file"
-    echo "  --runs N          Number of profiling runs (default: 3)"
+    echo "  --runs N          Number of timed runs per component (default: 3)"
+    echo "  --warmup-benchmarks N"
+    echo "                    Number of full benchmark passes to discard before measuring"
+    echo "  --benchmark-repeats N"
+    echo "                    Number of full benchmark passes to aggregate"
     echo "  --nsys            Run Nsight Systems profiling"
-    echo "  --seq-len N       Sequence length for micro-benchmarks (default: 256)"
     echo "  -h, --help        Show this help message"
     echo ""
     echo "Available folders:"
@@ -43,9 +45,10 @@ show_help() {
     echo "  - Multi-modal projector timing"
     echo "  - Decoder prefill timing"
     echo "  - Per-step decode timing"
-    echo "  - Individual layer timing"
-    echo "  - Attention method comparison (standard vs cuBLAS)"
-    echo "  - Linear/GEMM method comparison"
+    echo "  - Individual decoder-layer timing"
+    echo ""
+    echo "For the report-ready H200 component benchmark, use:"
+    echo "  sbatch benchmark_detailed_job.sh"
 }
 
 # Check for help flag

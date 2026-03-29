@@ -1,53 +1,44 @@
-# Detailed Benchmark Results: H200 Warmup-Corrected Run
+# H200 Detailed Component Benchmark Results
 
-This file records the final usable H200 detailed benchmark that replaced the
-older warmup-contaminated component numbers.
+This file is the canonical source for the warmup-corrected H200 component
+numbers used in `report/report_no_abstract.tex`.
 
----
+## Evidence Chain
 
-## Environment
+| Item | Value |
+|------|-------|
+| Script | `hw1-asr/benchmark_detailed.py` |
+| Batch runner | `hw1-asr/benchmark_detailed_job.sh` |
+| Job ID | `2236079` |
+| Date | `Fri 27 Mar 04:54 GMT 2026` |
+| Branch / commit | `ankush` / `8202f955868cb0c76b8b71f45adc794a1f3c10ee` |
+| Compared configs | `glm_asr_triton_template` vs `glm_asr_triton_example` |
+| Args | `--runs 5 --warmup-benchmarks 1 --benchmark-repeats 3` |
+| Raw bundle | `../logs/h200_detailed_2236079/` |
 
-| Parameter | Value |
-|-----------|-------|
-| **Date** | Fri 27 Mar 04:54 GMT 2026 |
-| **Hostname** | saxa.inf.ed.ac.uk |
-| **GPU** | NVIDIA H200 MIG 3g.71gb |
-| **Branch** | ankush |
-| **Commit** | `8202f955868cb0c76b8b71f45adc794a1f3c10ee` |
-| **Job ID** | `2236079` |
-| **Script** | `hw1-asr/benchmark_detailed.py` |
-| **Args** | `--runs 5 --warmup-benchmarks 1 --benchmark-repeats 3` |
-| **Compared Configs** | `glm_asr_triton_template` vs `glm_asr_triton_example` |
+## Report Use
 
----
+Use this file for:
 
-## Why this file exists
+- Table `tab:detailed`
+- Table `tab:peroperator`
+- the root-cause discussion that cites the corrected H200 component timings
 
-The older H200 detailed benchmark in [benchmarks.md](./benchmarks.md) included
-first-use Triton compilation and warmup in the timed component measurements.
-That inflated the encoder and prefill stages and made the component breakdown
-less representative of steady-state behavior.
+## Why This Replaced The Older Detailed Benchmark
 
-This file records the corrected run that:
+The older H200 detailed numbers were inflated by first-use Triton compilation and
+warmup effects. Job `2236079` fixes that by discarding one full benchmark pass
+and averaging three measured benchmark passes, while still using `5` timed runs
+per component inside each pass.
 
-- discards one full benchmark pass for warmup
-- averages three measured full benchmark passes
-- preserves both raw logs and a parsed summary in the repo
+## Raw Artifacts
 
----
-
-## Local Artifacts
-
-Pulled from the cluster into `logs/detailed_2236079/`:
-
-- [job_metadata.txt](../logs/detailed_2236079/job_metadata.txt)
-- [benchmark_detailed_slurm_2236079.log](../logs/detailed_2236079/benchmark_detailed_slurm_2236079.log)
-- [glm_asr_triton_template_detailed.log](../logs/detailed_2236079/glm_asr_triton_template_detailed.log)
-- [glm_asr_triton_example_detailed.log](../logs/detailed_2236079/glm_asr_triton_example_detailed.log)
-- [comparison_summary.json](../logs/detailed_2236079/comparison_summary.json)
-- [comparison_summary.md](../logs/detailed_2236079/comparison_summary.md)
-
----
+- [job_metadata.txt](../logs/h200_detailed_2236079/job_metadata.txt)
+- [benchmark_detailed_slurm_2236079.log](../logs/h200_detailed_2236079/benchmark_detailed_slurm_2236079.log)
+- [glm_asr_triton_template_detailed.log](../logs/h200_detailed_2236079/glm_asr_triton_template_detailed.log)
+- [glm_asr_triton_example_detailed.log](../logs/h200_detailed_2236079/glm_asr_triton_example_detailed.log)
+- [comparison_summary.json](../logs/h200_detailed_2236079/comparison_summary.json)
+- [comparison_summary.md](../logs/h200_detailed_2236079/comparison_summary.md)
 
 ## Final Parsed Summary
 
@@ -59,7 +50,7 @@ Pulled from the cluster into `logs/detailed_2236079/`:
 | Decoder (50 decode steps) | 580.45 | 817.09 | 1.41x |
 | **TOTAL (estimated for 50 tokens)** | **630.09** | **1005.73** | **1.60x** |
 
-Template-only component share:
+## Template-Only Share Used For Table `tab:detailed`
 
 | Component | Time (ms) | % of Total |
 |-----------|----------:|-----------:|
@@ -69,14 +60,13 @@ Template-only component share:
 | Decoder (50 decode steps) | 580.45 | 92.1% |
 | **TOTAL** | **630.09** | **100%** |
 
-Average template decode step: `580.45 / 50 = 11.61ms`.
-Average baseline decode step: `817.09 / 50 = 16.34ms`.
+Average template decode step: `580.45 / 50 = 11.61 ms`
 
----
+Average baseline decode step: `817.09 / 50 = 16.34 ms`
 
-## Stable Measured Passes
+## Stable Measured Passes After Warmup Discard
 
-Template (`glm_asr_triton_template`), measured passes after warmup discard:
+Template (`glm_asr_triton_template`):
 
 | Pass | Audio Encoder | Projector | Prefill | Decode Step Avg |
 |------|--------------:|----------:|--------:|----------------:|
@@ -84,7 +74,7 @@ Template (`glm_asr_triton_template`), measured passes after warmup discard:
 | Measured 2/3 | 36.47 | 0.14 | 12.98 | 11.61 |
 | Measured 3/3 | 36.51 | 0.14 | 12.93 | 11.58 |
 
-Baseline (`glm_asr_triton_example`), measured passes after warmup discard:
+Baseline (`glm_asr_triton_example`):
 
 | Pass | Audio Encoder | Projector | Prefill | Decode Step Avg |
 |------|--------------:|----------:|--------:|----------------:|
@@ -92,16 +82,9 @@ Baseline (`glm_asr_triton_example`), measured passes after warmup discard:
 | Measured 2/3 | 167.00 | 1.10 | 20.15 | 16.56 |
 | Measured 3/3 | 166.97 | 1.10 | 20.88 | 16.14 |
 
-These are the numbers that should be used for:
-
-- the corrected H200 component breakdown in the report
-- the H200 per-operator comparison table
-
----
-
 ## Notes
 
-- This is an H200 MIG detailed benchmark, not an RTX 5090 benchmark.
+- This is an H200 MIG component benchmark, not an RTX 5090 benchmark.
 - `benchmark_detailed.py` measures isolated forward passes and estimates decode
   cost using 50 single-step decode iterations.
 - The larger end-to-end H200 speedup still depends on KV-cached generation in

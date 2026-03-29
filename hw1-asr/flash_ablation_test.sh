@@ -1,4 +1,6 @@
 #!/bin/bash
+# Historical exploratory script.
+# Canonical Section 5.3 source is ../benchmarks/benchmarks_attention.md.
 #SBATCH --job-name=flash-ablat
 #SBATCH --partition=Teaching
 #SBATCH --nodelist=saxa

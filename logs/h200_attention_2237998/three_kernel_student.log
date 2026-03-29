@@ -1,0 +1,45 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+======================================================================
+GLM-ASR Student Version Benchmark
+======================================================================
+
+Loading test audio...
+Loaded audio from /home/s2884198/edin-mls-26-spring/hw1-asr/test_audio.wav
+Audio duration: 3.50s
+Expected: CONCORD RETURNED TO ITS PLACE AMIDST THE TENTS
+
+======================================================================
+Testing: glm_asr_triton_template
+======================================================================
+Loading model from glm_asr_triton_template...
+Attention mode: three_kernel
+Loading HuggingFace model: zai-org/GLM-ASR-Nano-2512
+Creating Triton model with config:
+  Audio: hidden=1280, heads=20, layers=32
+  Text: hidden=2048, heads=16, kv_heads=4, layers=28
+Loading HuggingFace weights...
+Loading weights:   0%|          | 0/745 [00:00<?, ?it/s]Loading weights:  10%|█         | 75/745 [00:00<00:00, 725.35it/s]Loading weights:  20%|█▉        | 148/745 [00:00<00:01, 574.04it/s]Loading weights:  28%|██▊       | 208/745 [00:00<00:00, 580.13it/s]Loading weights:  36%|███▌      | 268/745 [00:00<00:00, 545.89it/s]Loading weights:  44%|████▍     | 326/745 [00:00<00:00, 556.86it/s]Loading weights:  51%|█████▏    | 383/745 [00:00<00:00, 551.99it/s]Loading weights:  59%|█████▉    | 439/745 [00:00<00:00, 553.63it/s]Loading weights:  66%|██████▋   | 495/745 [00:01<00:01, 204.88it/s]Loading weights:  72%|███████▏  | 536/745 [00:01<00:00, 223.47it/s]Loading weights:  77%|███████▋  | 574/745 [00:01<00:00, 198.65it/s]Loading weights:  81%|████████  | 605/745 [00:02<00:00, 186.16it/s]Loading weights:  85%|████████▍ | 631/745 [00:02<00:00, 165.76it/s]Loading weights:  88%|████████▊ | 653/745 [00:02<00:00, 153.73it/s]Loading weights:  90%|█████████ | 672/745 [00:02<00:00, 156.44it/s]Loading weights:  93%|█████████▎| 691/745 [00:02<00:00, 151.18it/s]Loading weights:  95%|█████████▌| 708/745 [00:02<00:00, 139.85it/s]Loading weights:  97%|█████████▋| 724/745 [00:02<00:00, 143.73it/s]Loading weights: 100%|█████████▉| 743/745 [00:03<00:00, 153.33it/s]Loading weights: 100%|██████████| 745/745 [00:03<00:00, 244.35it/s]
+Loading audio encoder weights...
+Loading multi-modal projector weights...
+Loading text decoder weights...
+Weight loading complete!
+Using generate function: _generate_v8b
+Warmup (2 runs)...
+Benchmarking (5 runs)...
+  Run 1: 206.0ms (13 tokens)
+  Run 2: 208.8ms (13 tokens)
+  Run 3: 207.0ms (13 tokens)
+  Run 4: 206.6ms (13 tokens)
+  Run 5: 206.4ms (13 tokens)
+
+======================================================================
+RESULTS
+======================================================================
+Time: 207.0ms (+/- 0.9ms)
+Tokens: 13
+Speed: 15.92ms/token
+
+Transcription: Concord returned to its place amidst the tents.
+
+Accuracy: 100.0%
+Status: PASS

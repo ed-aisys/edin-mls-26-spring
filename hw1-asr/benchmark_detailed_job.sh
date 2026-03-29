@@ -1,4 +1,6 @@
 #!/bin/bash
+# Canonical output doc: ../benchmarks/benchmarks_detailed.md
+# Raw outputs: benchmark_runs/detailed_<jobid>/...
 #SBATCH --job-name=detailed-bench
 #SBATCH --partition=Teaching
 #SBATCH --nodelist=saxa
