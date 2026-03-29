@@ -580,34 +580,61 @@ Warmup autotune & +3.1\,ms & Micro-benchmarks chose suboptimal configs \\
 \latestsource{Source: \texttt{benchmarks/benchmarks\_history.md}; historical RTX~5090 development record extracted from pre-cleanup docs at branch base \texttt{f8c2f36}.}
 
 \subsection{Benchmark Source Map}
+\label{app:benchmap}
 
-\latestchgblock{Table~\ref{tab:benchmap} provides a direct trace from the main benchmark-backed report claims to their canonical benchmark documents, scripts, and raw artifacts.  The intended lookup path is: report table $\rightarrow$ canonical benchmark doc $\rightarrow$ script/runner $\rightarrow$ raw artifact or generated result file.}
+\latestchgblock{This subsection provides a direct trace from the main benchmark-backed report claims to their canonical benchmark documents, scripts, and raw artifacts. The intended lookup path is: report table $\rightarrow$ canonical benchmark doc $\rightarrow$ script/runner $\rightarrow$ raw artifact or generated result file.}
 
-\begin{table}[h]
-\centering
-\caption{\latestchglabel\ Benchmark source map for the main report claims.}
-\label{tab:benchmap}
-\footnotesize
-\begin{tabularx}{\linewidth}{@{}p{0.18\linewidth}p{0.16\linewidth}YY@{}}
-\toprule
-\textbf{Report element} & \textbf{Canonical doc} & \textbf{Script / runner} & \textbf{Artifact} \\
-\midrule
-\texttt{tab:e2e}, \texttt{tab:comparison} & \texttt{benchmarks.md} & \texttt{benchmark\_student.py} & H200 e2e bundle \texttt{h200\_e2e\_2225992} \\
-\texttt{tab:detailed}, \texttt{tab:peroperator} & \texttt{benchmarks\_detailed.md} & \texttt{benchmark\_detailed.py} and \texttt{benchmark\_detailed\_job.sh} & H200 detailed bundle \texttt{h200\_detailed\_2236079} \\
-\texttt{tab:ablation} & \texttt{benchmarks\_ablation.md} & \texttt{ablation\_test.py} and \texttt{ablation\_job.sh} & Generated files \texttt{ablation\_results.json} and \texttt{ablation\_results.md} \\
-\texttt{tab:crossgpu\_main} (H200) & \texttt{benchmarks.md} & \texttt{benchmark\_student.py} & Same H200 e2e bundle \texttt{h200\_e2e\_2225992} \\
-\texttt{tab:crossgpu\_main} (RTX~5090) & \texttt{benchmarks\_5090.md} & \texttt{benchmark\_student.py} & Embedded confirmation transcript in the benchmark doc \\
-Section~5.3 & \texttt{benchmarks\_attention.md} & \texttt{flash\_vs\_three\_kernel\_job.sh} & H200 attention bundle \texttt{h200\_attention\_2238022} \\
-\texttt{tab:progression}, \texttt{tab:rejected} & \texttt{benchmarks\_history.md} & Historical development runs & Extracted history at branch base \texttt{f8c2f36} \\
-\bottomrule
-\end{tabularx}
-\end{table}
+{\footnotesize
+\noindent\latestchglabel\ \textbf{Main benchmark source map.}
+
+\medskip
+\noindent\textbf{\texttt{tab:e2e}, \texttt{tab:comparison}.}
+Canonical doc: \texttt{benchmarks.md}.
+Script: \texttt{benchmark\_student.py}.
+Artifact: H200 e2e bundle \texttt{h200\_e2e\_2225992}.
+
+\medskip
+\noindent\textbf{\texttt{tab:detailed}, \texttt{tab:peroperator}.}
+Canonical doc: \texttt{benchmarks\_detailed.md}.
+Script: \texttt{benchmark\_detailed.py} and \texttt{benchmark\_detailed\_job.sh}.
+Artifact: H200 detailed bundle \texttt{h200\_detailed\_2236079}.
+
+\medskip
+\noindent\textbf{\texttt{tab:ablation}.}
+Canonical doc: \texttt{benchmarks\_ablation.md}.
+Script: \texttt{ablation\_test.py} and \texttt{ablation\_job.sh}.
+Artifact: generated files \texttt{ablation\_results.json} and \texttt{ablation\_results.md}.
+
+\medskip
+\noindent\textbf{\texttt{tab:crossgpu\_main} (H200).}
+Canonical doc: \texttt{benchmarks.md}.
+Script: \texttt{benchmark\_student.py}.
+Artifact: same H200 e2e bundle \texttt{h200\_e2e\_2225992}.
+
+\medskip
+\noindent\textbf{\texttt{tab:crossgpu\_main} (RTX~5090).}
+Canonical doc: \texttt{benchmarks\_5090.md}.
+Script: \texttt{benchmark\_student.py}.
+Artifact: embedded confirmation transcript in the benchmark doc.
+
+\medskip
+\noindent\textbf{Section~5.3.}
+Canonical doc: \texttt{benchmarks\_attention.md}.
+Script: \texttt{flash\_vs\_three\_kernel\_job.sh}.
+Artifact: H200 attention bundle \texttt{h200\_attention\_2238022}.
+
+\medskip
+\noindent\textbf{\texttt{tab:progression}, \texttt{tab:rejected}.}
+Canonical doc: \texttt{benchmarks\_history.md}.
+Script/runner: historical development runs.
+Artifact: extracted history at branch base \texttt{f8c2f36}.
+\par}
 
 \subsection{Code Map}
 
 \latestchglabel
 
-\latestchgblock{Following the C4 model's idea of creating ``maps of your code'' through progressively higher-level abstractions, and arc42's level-1 building-block view, Table~\ref{tab:codemap} groups the supplementary code by building block, responsibility, and primary source location rather than listing every kernel symbol individually.  This gives a grader a top-down navigation aid first; Table~\ref{tab:benchmap} then provides the trace from report claims to benchmark scripts and artifacts.}
+\latestchgblock{Following the C4 model's idea of creating ``maps of your code'' through progressively higher-level abstractions, and arc42's level-1 building-block view, Table~\ref{tab:codemap} groups the supplementary code by building block, responsibility, and primary source location rather than listing every kernel symbol individually. This gives a grader a top-down navigation aid first; the benchmark source map above then provides the trace from report claims to benchmark scripts and artifacts.}
 
 \begin{table}[h]
 \centering
