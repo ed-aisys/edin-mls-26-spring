@@ -1,7 +1,7 @@
 # H200 End-to-End Benchmark Results
 
 This file is the canonical source for the H200 MIG 3g.71gb end-to-end numbers
-used by `report/report_no_abstract.tex`.
+used on the submission branch.
 
 ## Evidence Chain
 
@@ -14,14 +14,14 @@ used by `report/report_no_abstract.tex`.
 | Job ID | `2225992` |
 | Compared configs | `glm_asr_triton_template` vs `glm_asr_triton_example` |
 
-## Report Use
+## Canonical Use
 
 Use this file for:
 
 - the H200 headline result (`204.8 ms`, baseline `464.1 ms`)
-- Table `tab:e2e`
-- Table `tab:comparison`
-- the H200 row of Table `tab:crossgpu_main`
+- the H200 end-to-end timing table
+- the end-to-end comparison against the baseline
+- the H200 row of the cross-GPU comparison
 
 Do not use this file for H200 component timings. Those live in
 `benchmarks_detailed.md`.

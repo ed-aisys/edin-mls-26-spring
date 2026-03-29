@@ -1,18 +1,17 @@
 # Final Project Reproduction Guide
 
-This file is the project-level entry point for reproducing the final report and
-the benchmark evidence used on the submission branch.
+This file is the project-level entry point for reproducing the benchmark
+evidence used on the submission branch.
 
 ## Source Of Truth
 
-- Final report source: `report/report_no_abstract.tex`
-- Final report PDF: `report/report_no_abstract.pdf`
 - Benchmark provenance manual: `benchmarks/benchmarks_README.md`
-- Report-to-benchmark map: `benchmarks/benchmark_provenance.md`
+- Claim-to-benchmark map: `benchmarks/benchmark_provenance.md`
 
-This submission branch is the maintained report branch. The canonical benchmark docs
-record the exact branch/commit used for each historical benchmark job. For any
-new reproduction run, record the current checkout explicitly with:
+This submission branch carries the maintained benchmark evidence set. The
+canonical benchmark docs record the exact branch/commit used for each
+historical benchmark job. For any new reproduction run, record the current
+checkout explicitly with:
 
 ```bash
 git rev-parse --abbrev-ref HEAD
@@ -33,19 +32,18 @@ implementation rather than just rerun the benchmarks.
 | `hw1-asr/benchmark_student.py` | End-to-end benchmark script used for headline timings and cross-GPU confirmation runs |
 | `hw1-asr/benchmark_detailed.py` | Detailed component benchmark used for Table 3 / Table 7 style timings |
 | `hw1-asr/ablation_test.py` | H200 ablation study script |
-| `hw1-asr/flash_vs_three_kernel_job.sh` | Canonical Section 5.3 batch benchmark entry point |
-| `report/report_no_abstract.tex` | Final maintained report source |
+| `hw1-asr/flash_vs_three_kernel_job.sh` | Canonical attention-backend comparison batch benchmark entry point |
 | `benchmarks/` | Canonical benchmark docs and provenance map |
 | `logs/` | Pulled raw H200 evidence bundles kept in-repo |
 
 ## Evidence Classes
 
-The report intentionally mixes a few evidence types. The canonical status is in
+The submission evidence intentionally mixes a few evidence types. The canonical status is in
 `benchmarks/benchmark_provenance.md`.
 
 | Evidence Type | Used For |
 |---------------|----------|
-| `raw-log-backed` | H200 end-to-end, H200 detailed/component timings, Section 5.3 attention comparison |
+| `raw-log-backed` | H200 end-to-end, H200 detailed/component timings, same-codebase attention comparison |
 | `generated-artifact-backed` | H200 ablation study |
 | `embedded-transcript-backed` | RTX 5090 confirmation rerun |
 | `history-backed` | Appendix progression table and rejected-optimization table |
@@ -89,7 +87,7 @@ Optional overrides:
 
 ## Exact Benchmark Entry Points
 
-The thin wrapper below is the easiest way to run the exact report benchmark
+The thin wrapper below is the easiest way to run the canonical benchmark
 entry points:
 
 ```bash
@@ -106,7 +104,7 @@ Supported targets:
 | `h200-attention` | Submits `hw1-asr/flash_vs_three_kernel_job.sh` with `sbatch` | `benchmarks/benchmarks_attention.md` |
 | `print` | Prints the exact underlying commands without running them | n/a |
 
-## Exact Commands Behind Each Report Benchmark
+## Exact Commands Behind Each Canonical Benchmark
 
 The wrapper above intentionally stays thin. These are the underlying commands it
 uses.
@@ -154,7 +152,7 @@ That job runs:
 python3 ablation_test.py
 ```
 
-### Section 5.3 Attention Comparison
+### Attention Backend Comparison
 
 ```bash
 sbatch hw1-asr/flash_vs_three_kernel_job.sh
@@ -185,7 +183,7 @@ python3 benchmark_detailed.py glm_asr_triton_template --runs 5 --warmup-benchmar
 
 ### RTX 5090 Confirmation Rerun
 
-The report's RTX 5090 confirmation rerun is transcript-backed in
+The RTX 5090 confirmation rerun is transcript-backed in
 `benchmarks/benchmarks_5090.md`. The benchmark script is still:
 
 ```bash
@@ -217,11 +215,8 @@ If you are grading or reproducing the project, read in this order:
 1. `PROJECT_README.md`
 2. `benchmarks/benchmarks_README.md`
 3. `benchmarks/benchmark_provenance.md`
-4. `report/report_no_abstract.tex`
-
 That path gives you:
 
-- the maintained report file
 - the canonical benchmark docs
 - the exact script or job used for each number
 - the raw or historical evidence class behind each number

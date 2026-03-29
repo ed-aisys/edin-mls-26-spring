@@ -2,7 +2,7 @@
 
 - Job ID: `2238022`
 - GPU: H200 MIG 3g.71gb on `saxa`
-- Target report section: `Section 5.3 (FlashAttention-Style Attention)`
+- Target benchmark doc: `benchmarks/benchmarks_attention.md`
 - Config A: `GLM_ASR_ATTENTION_MODE=auto`
   Current deployed path: flash kernel for seq_q > 4, SDPA fallback for seq_q <= 4.
 - Config B: `GLM_ASR_ATTENTION_MODE=three_kernel`
@@ -33,4 +33,3 @@
 - `edin-mls-26-spring/hw1-asr/attention_mode_runs/flash_vs_three_kernel_2238022/three_kernel_student.log`
 - `edin-mls-26-spring/hw1-asr/attention_mode_runs/flash_vs_three_kernel_2238022/three_kernel_detailed.log`
 - `edin-mls-26-spring/hw1-asr/attention_mode_runs/flash_vs_three_kernel_2238022/comparison_summary.json`
-

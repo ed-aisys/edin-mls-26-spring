@@ -1,7 +1,7 @@
 # H200 Ablation Benchmark Results
 
-This file is the canonical summary for the H200 ablation results cited in
-`report/report_no_abstract.tex`.
+This file is the canonical summary for the H200 ablation results cited on the
+submission branch.
 
 ## Evidence Chain
 
@@ -49,12 +49,12 @@ Job `2228602` failed early due to a `total_mem` / `total_memory` property bug in
 | Triton matmul | 206.2 | +1.0 |
 | MLP fusion off | 204.5 | -0.7 |
 
-## Report Use
+## Canonical Use
 
 Use this file for:
 
-- Table `tab:ablation`
-- the ablation discussion in Sections 4 and 6
+- the H200 ablation summary
+- the main ablation discussion
 
 If you need the full 22-test table or the exact per-test diffs, go to the
 generated files in `hw1-asr/`.

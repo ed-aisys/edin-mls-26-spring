@@ -1,9 +1,9 @@
 # GLM-ASR Performance Comparison - Summary
 
 > Supplementary multi-audio benchmark only. This file is not the source of
-> record for any number in `report/report_no_abstract.tex`; use
+> record for any canonical submission benchmark number; use
 > `../benchmarks/benchmarks_README.md` and `../benchmarks/benchmark_provenance.md`
-> for canonical report evidence.
+> for canonical benchmark evidence.
 
 ## Executive Summary
 

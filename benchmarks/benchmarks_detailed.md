@@ -1,7 +1,7 @@
 # H200 Detailed Component Benchmark Results
 
 This file is the canonical source for the warmup-corrected H200 component
-numbers used in `report/report_no_abstract.tex`.
+numbers used on the submission branch.
 
 ## Evidence Chain
 
@@ -15,12 +15,12 @@ numbers used in `report/report_no_abstract.tex`.
 | Args | `--runs 5 --warmup-benchmarks 1 --benchmark-repeats 3` |
 | Raw bundle | `../logs/h200_detailed_2236079/` |
 
-## Report Use
+## Canonical Use
 
 Use this file for:
 
-- Table `tab:detailed`
-- Table `tab:peroperator`
+- the H200 component breakdown
+- the per-operator comparison
 - the root-cause discussion that cites the corrected H200 component timings
 
 ## Why This Replaced The Older Detailed Benchmark
@@ -49,7 +49,7 @@ per component inside each pass.
 | Decoder (50 decode steps) | 580.45 | 817.09 | 1.41x |
 | **TOTAL (estimated for 50 tokens)** | **630.09** | **1005.73** | **1.60x** |
 
-## Template-Only Share Used For Table `tab:detailed`
+## Template-Only Share Used For The H200 Component Breakdown
 
 | Component | Time (ms) | % of Total |
 |-----------|----------:|-----------:|

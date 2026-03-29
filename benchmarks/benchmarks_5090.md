@@ -1,8 +1,7 @@
 # RTX 5090 Confirmation Benchmark Results
 
 This file is the canonical source for the later RTX 5090 confirmation rerun used
-by the headline RTX 5090 number and Table `tab:crossgpu_main` in
-`report/report_no_abstract.tex`.
+by the submission branch headline RTX 5090 number and the cross-GPU comparison.
 
 ## Evidence Chain
 
@@ -18,14 +17,14 @@ by the headline RTX 5090 number and Table `tab:crossgpu_main` in
 No standalone raw console log for this confirmation rerun is currently archived
 in the repo. The console transcript preserved here is the source of record.
 
-## Report Use
+## Canonical Use
 
 Use this file for:
 
 - the RTX 5090 headline number (`100.4 ms`)
-- the RTX 5090 row of Table `tab:crossgpu_main`
+- the RTX 5090 row of the cross-GPU comparison
 
-Do not use this file for the appendix progression table. The appendix uses the
+Do not use this file for the historical progression chain. That chain uses the
 older development chain preserved in `benchmarks_history.md`.
 
 ## Environment

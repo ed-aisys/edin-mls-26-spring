@@ -1,7 +1,7 @@
-# Section 5.3 Attention Benchmark Results
+# Attention Backend Benchmark Results
 
-This file is the canonical source for Section 5.3
-(`FlashAttention-Style Attention`) in `report/report_no_abstract.tex`.
+This file is the canonical source for the same-codebase attention-backend
+comparison on the submission branch.
 
 ## Evidence Chain
 
@@ -15,7 +15,7 @@ This file is the canonical source for Section 5.3
 
 ## Pending Clean Submission-Branch Verification
 
-To verify the Section 5.3 numbers from a clean anonymous submission checkout,
+To verify the canonical attention-comparison numbers from a clean anonymous submission checkout,
 two identical reruns were submitted from commit `a099081bad074fd0ca1e6612075681bec989b716`
 on `submission-final` using the same canonical script:
 
@@ -49,7 +49,7 @@ mode the actual model uses in deployment:
   tiny KV-cached decode regime
 - otherwise it routes to the fused Triton flash-attention kernel
 
-So the Section 5.3 benchmark compares the real deployed mixed dispatch against
+So this benchmark compares the real deployed mixed dispatch against
 the reintroduced 3-kernel/materialized-score path, not "pure flash-only"
 against 3-kernel.
 
@@ -100,7 +100,7 @@ The rerun now gives a consistent same-codebase result:
 - the warmup-corrected detailed benchmark is also lower for the current path
   (`625.04 ms` vs `641.09 ms`)
 
-Section 5.3 should still present this as a modest improvement rather than a
+This comparison should still be presented as a modest improvement rather than a
 dramatic standalone headline result. The evidence-backed statement is that, on
 H200 MIG 3g.71gb, the current deployed attention strategy is slightly but
 consistently faster than the reintroduced 3-kernel/materialized-score path in
@@ -111,7 +111,7 @@ the same codebase.
 The previous same-codebase job `2237998` remains archived in
 `../logs/h200_attention_2237998/`, but it used a weaker end-to-end methodology
 and produced a mixed result. Job `2238022` supersedes it as the canonical
-Section 5.3 evidence.
+attention-comparison evidence.
 
 ## Historical Evidence Preserved During Cleanup
 

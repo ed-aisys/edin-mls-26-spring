@@ -1,7 +1,7 @@
 # RTX 5090 Development Benchmark History
 
 This file is the canonical source for the original RTX 5090 development chain
-used by Appendix Table `tab:progression` in `report/report_no_abstract.tex`.
+used for the historical optimization progression on the submission branch.
 
 ## Source Status
 
@@ -13,16 +13,16 @@ branch state primarily from:
 - `docs/exhaustive_optimization_list.md`
 
 That makes this file `history-backed`, not raw-log-backed. It exists so the
-appendix can keep the original step-by-step benchmark chain after the verbose
-historical docs are removed.
+submission docs can keep the original step-by-step benchmark chain after the
+verbose historical docs are removed.
 
 ## Why This Exists Separately From `benchmarks_5090.md`
 
 There are two different RTX 5090 benchmark records in this repo:
 
-- `benchmarks_5090.md`: later confirmation rerun used for the report headline
-  and cross-GPU table (`100.4 ms` vs `262.2 ms`)
-- this file: original development benchmark chain used for the appendix
+- `benchmarks_5090.md`: later confirmation rerun used for the headline RTX 5090
+  number and cross-GPU comparison (`100.4 ms` vs `262.2 ms`)
+- this file: original development benchmark chain used for the historical
   progression (`261.3 ms` baseline to `98.5 ms` final)
 
 These should not be mixed, because the appendix deltas are only meaningful when
@@ -83,8 +83,8 @@ across branches helps pin down which historical branch introduced or motivated e
 
 Use this file only for:
 
-- Appendix Table `tab:progression`
-- Appendix Table `tab:rejected`
+- the historical progression chain
+- the rejected-optimization summary
 - narrative discussion of the original RTX 5090 development chain
 
 Do not use this file for:
