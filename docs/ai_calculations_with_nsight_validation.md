@@ -89,7 +89,7 @@ We profiled on the Edinburgh teaching cluster's H200 MIG 3g.71gb partition.
 | **Shared Memory (opt-in per block)** | 227 KB | `TARGET_INFO_GPU.maxShmemPerBlockOptin` (232,448 bytes) |
 | **Shared Memory (per SM)** | 228 KB | `TARGET_INFO_GPU.maxShmemPerSm` (233,472 bytes) |
 
-All values above come directly from the `profile_template 3g.71gb.sqlite` file, table `TARGET_INFO_GPU`. Nsight Systems queries the GPU driver at profile time and records these hardware specs.
+All values above come directly from the Nsight Systems sqlite export used for validation, table `TARGET_INFO_GPU`. Nsight Systems queries the GPU driver at profile time and records these hardware specs.
 
 ### Ridge Point Calculation
 
@@ -224,7 +224,7 @@ Both take a tensor of N numbers in, and produce N numbers out. No reduction, no 
 
 ### Nsight Data
 
-From `profile_template 3g.71gb.sqlite`, table `CUPTI_ACTIVITY_KIND_KERNEL`:
+From the same Nsight Systems sqlite export, table `CUPTI_ACTIVITY_KIND_KERNEL`:
 
 | Kernel | Calls | Total Time | Avg Time | Grid | Block | Shared Mem | Registers |
 |--------|-------|-----------|----------|------|-------|-----------|-----------|

@@ -13,6 +13,20 @@ This file is the canonical source for Section 5.3
 | Compared modes | `GLM_ASR_ATTENTION_MODE=auto` vs `GLM_ASR_ATTENTION_MODE=three_kernel` |
 | Raw bundle | `../logs/h200_attention_2238022/` |
 
+## Pending Clean Submission-Branch Verification
+
+To verify the Section 5.3 numbers from a clean anonymous submission checkout,
+two identical reruns were submitted from commit `a099081bad074fd0ca1e6612075681bec989b716`
+on `submission-final` using the same canonical script:
+
+- pending verification job `2238320`
+- pending verification job `2238321`
+
+These jobs were submitted from fresh cluster worktrees of the pushed submission
+branch, not from a dirty development checkout. Once they complete, their raw
+bundles should be pulled into `logs/` and compared against job `2238022` before
+promoting any new numbers here or in the report.
+
 ## What The Canonical Script Measures
 
 `flash_vs_three_kernel_job.sh` benchmarks the current template codebase in two

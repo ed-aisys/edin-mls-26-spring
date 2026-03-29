@@ -9,6 +9,8 @@
 \usepackage{amsmath}
 \usepackage{xcolor}
 \usepackage{multirow}
+\usepackage{array}
+\usepackage{tabularx}
 \usepackage{tikz}
 \usepackage{pgfplots}
 \pgfplotsset{compat=1.18}
@@ -34,6 +36,7 @@
   \par\noindent
   {\footnotesize \latestchglabel\ \parbox[t]{0.9\linewidth}{#1}}\par
 }
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
 
 \begin{document}
 \maketitle
@@ -584,20 +587,20 @@ Warmup autotune & +3.1\,ms & Micro-benchmarks chose suboptimal configs \\
 \centering
 \caption{\latestchglabel\ Benchmark source map for the main report claims.}
 \label{tab:benchmap}
-\small
-\begin{tabular}{@{}p{0.18\linewidth}p{0.18\linewidth}p{0.24\linewidth}p{0.26\linewidth}@{}}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{0.18\linewidth}p{0.16\linewidth}YY@{}}
 \toprule
 \textbf{Report element} & \textbf{Canonical doc} & \textbf{Script / runner} & \textbf{Artifact} \\
 \midrule
-\texttt{tab:e2e}, \texttt{tab:comparison} & \texttt{benchmarks.md} & \texttt{benchmark\_student.py} & \texttt{logs/h200\_e2e\_2225992/...} \\
-\texttt{tab:detailed}, \texttt{tab:peroperator} & \texttt{benchmarks\_detailed.md} & \texttt{benchmark\_detailed.py} / \texttt{benchmark\_detailed\_job.sh} & \texttt{logs/h200\_detailed\_2236079/...} \\
-\texttt{tab:ablation} & \texttt{benchmarks\_ablation.md} & \texttt{ablation\_test.py} / \texttt{ablation\_job.sh} & \texttt{hw1-asr/ablation\_results.\{json,md\}} \\
-\texttt{tab:crossgpu\_main} (H200) & \texttt{benchmarks.md} & \texttt{benchmark\_student.py} & \texttt{logs/h200\_e2e\_2225992/...} \\
-\texttt{tab:crossgpu\_main} (RTX~5090) & \texttt{benchmarks\_5090.md} & \texttt{benchmark\_student.py} & embedded transcript \\
-Section~5.3 & \texttt{benchmarks\_attention.md} & \texttt{flash\_vs\_three\_kernel\_job.sh} & \texttt{logs/h200\_attention\_2238022/...} \\
-\texttt{tab:progression}, \texttt{tab:rejected} & \texttt{benchmarks\_history.md} & historical development runs & extracted history at \texttt{f8c2f36} \\
+\texttt{tab:e2e}, \texttt{tab:comparison} & \texttt{benchmarks.md} & \texttt{benchmark\_student.py} & H200 e2e bundle \texttt{h200\_e2e\_2225992} \\
+\texttt{tab:detailed}, \texttt{tab:peroperator} & \texttt{benchmarks\_detailed.md} & \texttt{benchmark\_detailed.py} and \texttt{benchmark\_detailed\_job.sh} & H200 detailed bundle \texttt{h200\_detailed\_2236079} \\
+\texttt{tab:ablation} & \texttt{benchmarks\_ablation.md} & \texttt{ablation\_test.py} and \texttt{ablation\_job.sh} & Generated files \texttt{ablation\_results.json} and \texttt{ablation\_results.md} \\
+\texttt{tab:crossgpu\_main} (H200) & \texttt{benchmarks.md} & \texttt{benchmark\_student.py} & Same H200 e2e bundle \texttt{h200\_e2e\_2225992} \\
+\texttt{tab:crossgpu\_main} (RTX~5090) & \texttt{benchmarks\_5090.md} & \texttt{benchmark\_student.py} & Embedded confirmation transcript in the benchmark doc \\
+Section~5.3 & \texttt{benchmarks\_attention.md} & \texttt{flash\_vs\_three\_kernel\_job.sh} & H200 attention bundle \texttt{h200\_attention\_2238022} \\
+\texttt{tab:progression}, \texttt{tab:rejected} & \texttt{benchmarks\_history.md} & Historical development runs & Extracted history at branch base \texttt{f8c2f36} \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{table}
 
 \subsection{Code Map}
@@ -610,21 +613,21 @@ Section~5.3 & \texttt{benchmarks\_attention.md} & \texttt{flash\_vs\_three\_kern
 \centering
 \caption{\latestchglabel\ Level-1 building-block map of the supplementary code.}
 \label{tab:codemap}
-\small
-\begin{tabular}{@{}p{0.17\linewidth}p{0.31\linewidth}p{0.30\linewidth}p{0.14\linewidth}@{}}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{0.17\linewidth}YYp{0.15\linewidth}@{}}
 \toprule
 \textbf{Building block} & \textbf{Responsibility} & \textbf{Primary files / entry points} & \textbf{Report use} \\
 \midrule
 Benchmark harness & Runs the end-to-end, detailed, ablation, and attention-backend experiments; writes the logs that feed the benchmark documents. & \texttt{benchmark\_student.py}, \texttt{benchmark\_detailed.py}, \texttt{ablation\_test.py}, \texttt{flash\_vs\_three\_kernel\_job.sh} & Tables~\ref{tab:e2e}, \ref{tab:detailed}, \ref{tab:ablation}; Sec.~5.3 \\
-Optimized template runtime & Selects GPU-specific tile/configuration choices, wires the fused Triton kernels into the Hugging Face model, and implements KV-cached generation. & \texttt{template/layers.py}: \texttt{GPUProfile}, \texttt{\_compute\_attention\_tiles}, \texttt{\_generate\_v8b}, \texttt{\_try\_patch\_v8b} & Secs.~3--5, conclusion \\
-Attention subsystem & Implements the main attention dispatch: FlashAttention for long sequences, SDPA fallback for tiny decode steps, and the reintroduced 3-kernel path for controlled comparison. & \texttt{template/attention.py}: \texttt{flash\_attention\_kernel}, \texttt{scaled\_dot\_product\_attention} & Sec.~5.3, Table~\ref{tab:peroperator} \\
-RoPE subsystem & Applies rotary position embeddings with a fused kernel path and the runtime wrapper used by the decoder. & \texttt{template/rope.py}: \texttt{fused\_rope\_pair\_kernel}, \texttt{apply\_rotary\_pos\_emb} & Kernel-fusion discussion, appendix \\
-Baseline reference implementation & Provides the comparison target for end-to-end and per-operator speedups against our optimized template. & \texttt{example/layers.py}, \texttt{example/attention.py}, \texttt{example/rope.py} & Tables~\ref{tab:comparison}, \ref{tab:peroperator}, \ref{tab:crossgpu_main} \\
-Evidence bundle & Stores the canonical benchmark writeups and the pulled raw H200 artifacts used to trace report numbers back to scripts and runs. & \texttt{benchmarks/*.md}, \texttt{logs/h200\_*} & Appendix A.2--A.3 \\
+Optimized template runtime & Selects GPU-specific tile and pipeline choices, wires the fused Triton kernels into the model, and implements KV-cached generation. & \texttt{template/layers.py} with \texttt{GPUProfile} and \texttt{generate\_v8b} as the main runtime entry points & Secs.~3--5, conclusion \\
+Attention subsystem & Implements the deployed mixed attention dispatch: FlashAttention for long sequences, SDPA fallback for tiny decode steps, and the reintroduced 3-kernel path for controlled comparison. & \texttt{template/attention.py} with \texttt{flash\_attention\_kernel} and the mode-controlled attention wrapper & Sec.~5.3, Table~\ref{tab:peroperator} \\
+RoPE subsystem & Applies rotary position embeddings with a fused kernel path and the runtime wrapper used by the decoder. & \texttt{template/rope.py} with \texttt{fused\_rope\_pair\_kernel} and \texttt{apply\_rotary\_pos\_emb} & Kernel fusion, appendix \\
+Baseline reference implementation & Provides the comparison target for end-to-end and per-operator speedups against our optimized template. & \texttt{example/layers.py}, \texttt{example/attention.py}, and \texttt{example/rope.py} & Tables~\ref{tab:comparison}, \ref{tab:peroperator}, \ref{tab:crossgpu_main} \\
+Evidence bundle & Stores the canonical benchmark writeups and the pulled raw H200 artifacts used to trace report numbers back to scripts and runs. & \texttt{benchmarks/*.md} and \texttt{logs/h200\_*} & Appendix A.2--A.3 \\
 \bottomrule
-\end{tabular}
+\end{tabularx}
 \end{table}
 
-\latestsource{Structure based on two documentation patterns: the C4 model's abstraction-first ``maps of your code'' and arc42's level-1 building-block/source-mapping guidance.  In practice, that means naming a small set of coherent building blocks, stating each block's responsibility, and pointing to the 2--3 most important source locations rather than dumping a flat symbol list.}
+\latestsource{Structure based on two documentation patterns: the C4 model's abstraction-first code maps and arc42's level-1 building-block/source-mapping guidance. In practice, this table names a small set of coherent building blocks, states each block's responsibility, and points to the most important source locations rather than listing every kernel symbol.}
 
 \end{document}
