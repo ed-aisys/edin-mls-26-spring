@@ -3,6 +3,9 @@
 # Canonical Section 5.3 source is ../benchmarks/benchmarks_attention.md.
 #SBATCH --job-name=flash-ablat
 #SBATCH --mem=32G
+#SBATCH --partition=Teaching
+#SBATCH --nodelist=saxa
+#SBATCH --gres=gpu:3g.71gb:1
 #SBATCH --time=01:00:00
 #SBATCH --output=flash_ablation_%j.log
 #SBATCH --error=flash_ablation_%j.err

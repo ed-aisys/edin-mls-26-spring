@@ -3,6 +3,9 @@
 # Raw outputs: attention_mode_runs/flash_vs_three_kernel_<jobid>/...
 #SBATCH --job-name=flash-3kernel
 #SBATCH --mem=32G
+#SBATCH --partition=Teaching
+#SBATCH --nodelist=saxa
+#SBATCH --gres=gpu:3g.71gb:1
 #SBATCH --time=02:00:00
 #SBATCH --output=flash_vs_three_kernel_%j.log
 #SBATCH --error=flash_vs_three_kernel_%j.err

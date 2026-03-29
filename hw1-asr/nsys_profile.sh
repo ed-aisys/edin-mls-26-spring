@@ -1,6 +1,6 @@
 #!/bin/bash
 # Nsight Systems profiling for GLM-ASR.
-# Usage: allocate a GPU node, then run this script from hw1-asr/.
+# Usage: srun -p Teaching -w saxa --gres gpu:3g.71gb:1 --mem=32G --time=00:30:00 bash nsys_profile.sh
 
 set -euo pipefail
 

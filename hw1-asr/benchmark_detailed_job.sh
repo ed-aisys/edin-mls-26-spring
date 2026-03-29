@@ -3,6 +3,9 @@
 # Raw outputs: benchmark_runs/detailed_<jobid>/...
 #SBATCH --job-name=detailed-bench
 #SBATCH --mem=32G
+#SBATCH --partition=Teaching
+#SBATCH --nodelist=saxa
+#SBATCH --gres=gpu:3g.71gb:1
 #SBATCH --time=01:30:00
 #SBATCH --output=benchmark_detailed_slurm_%j.log
 #SBATCH --error=benchmark_detailed_slurm_%j.err

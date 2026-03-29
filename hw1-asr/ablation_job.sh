@@ -3,6 +3,9 @@
 # Generated outputs: ablation_results.json, ablation_results.md, ablation_output.log
 #SBATCH --job-name=ablation
 #SBATCH --mem=32G
+#SBATCH --partition=Teaching
+#SBATCH --nodelist=saxa
+#SBATCH --gres=gpu:3g.71gb:1
 #SBATCH --time=02:00:00
 #SBATCH --output=ablation_slurm_%j.log
 #SBATCH --error=ablation_slurm_%j.err

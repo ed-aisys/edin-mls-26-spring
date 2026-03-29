@@ -1,6 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=ncu-profile
 #SBATCH --mem=32G
+#SBATCH --partition=Teaching
+#SBATCH --nodelist=saxa
+#SBATCH --gres=gpu:3g.71gb:1
 #SBATCH --time=01:00:00
 #SBATCH --output=ncu_slurm_%j.log
 #SBATCH --error=ncu_slurm_%j.err
