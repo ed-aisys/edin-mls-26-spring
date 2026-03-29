@@ -17,6 +17,11 @@ import os
 import numpy as np
 
 
+def get_attention_mode_label():
+    """Return the template attention backend requested for this process."""
+    return os.environ.get("GLM_ASR_ATTENTION_MODE", "auto")
+
+
 class CUDATimer:
     """CUDA event-based timer for accurate GPU timing."""
 
@@ -581,6 +586,7 @@ def main():
             del sys.modules[mod_name]
 
     print(f"\nLoading model from {args.folder}...")
+    print(f"Attention mode: {get_attention_mode_label()}")
     from weight_loader import load_model_from_hf
     model, processor = load_model_from_hf("zai-org/GLM-ASR-Nano-2512")
 

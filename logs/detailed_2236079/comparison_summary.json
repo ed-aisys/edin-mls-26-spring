@@ -1,0 +1,16 @@
+{
+  "glm_asr_triton_template": {
+    "Audio Encoder": 36.53,
+    "Multi-modal Projector": 0.14,
+    "Decoder (Prefill)": 12.97,
+    "Decoder (50 decode steps)": 580.45,
+    "TOTAL (estimated for 50 tokens)": 630.09
+  },
+  "glm_asr_triton_example": {
+    "Audio Encoder": 167.02,
+    "Multi-modal Projector": 1.11,
+    "Decoder (Prefill)": 20.51,
+    "Decoder (50 decode steps)": 817.09,
+    "TOTAL (estimated for 50 tokens)": 1005.73
+  }
+}

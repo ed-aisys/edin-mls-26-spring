@@ -171,6 +171,10 @@ All 5 runs: 100% transcription accuracy, all PASS.
 
 Per-component profiling with 50 generated tokens (stock generate path, no KV cache).
 
+> Note: this section is the original 2026-03-16 detailed benchmark record and
+> includes first-use warmup effects. For the corrected warmup-controlled H200
+> component benchmark used in the report, see [benchmarks_detailed.md](./benchmarks_detailed.md).
+
 ### Run 1
 
 ```

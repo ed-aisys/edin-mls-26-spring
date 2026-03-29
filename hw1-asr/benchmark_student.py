@@ -18,6 +18,11 @@ import numpy as np
 import importlib
 
 
+def get_attention_mode_label():
+    """Return the template attention backend requested for this process."""
+    return os.environ.get("GLM_ASR_ATTENTION_MODE", "auto")
+
+
 def load_expected_text(audio_path):
     """
     Load expected transcription from a corresponding .txt file.
@@ -209,6 +214,7 @@ def benchmark_cutile_folder(folder_name, audio_array, num_warmup=1, num_runs=3):
         if hasattr(layers, 'AudioMLP'):
             layers.AudioMLP.FUSED = False
     print(f"Loading model from {folder_name}...")
+    print(f"Attention mode: {get_attention_mode_label()}")
     from weight_loader import load_model_from_hf
 
     model, processor = load_model_from_hf("zai-org/GLM-ASR-Nano-2512")
@@ -310,6 +316,7 @@ def benchmark_triton_folder(folder_name, audio_array, num_warmup=1, num_runs=3):
             layers.EncoderMLP.FUSED = False
 
     print(f"Loading model from {folder_name}...")
+    print(f"Attention mode: {get_attention_mode_label()}")
     from weight_loader import load_model_from_hf
     model, processor = load_model_from_hf("zai-org/GLM-ASR-Nano-2512")
 
