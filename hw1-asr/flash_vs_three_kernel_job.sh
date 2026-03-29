@@ -32,7 +32,7 @@ export TMP="$TMP_ROOT"
 export TEMP="$TMP_ROOT"
 export TORCH_EXTENSIONS_DIR="$TORCH_EXTENSIONS_DIR"
 
-STUDENT_ARGS=(--warmup 2 --runs 5)
+STUDENT_ARGS=(--warmup 2 --runs 5 --warmup-benchmarks 1 --benchmark-repeats 3)
 DETAILED_ARGS=(--runs 5 --warmup-benchmarks 1 --benchmark-repeats 3)
 
 {
@@ -151,14 +151,18 @@ lines.append("## End-to-End Student Benchmark")
 lines.append("")
 lines.append("| Mode | Mean (ms) | Std (ms) | Accuracy | Relative |")
 lines.append("|------|----------:|---------:|---------:|---------:|")
-speedup = three_student["time_ms"] / auto_student["time_ms"]
+relative = three_student["time_ms"] / auto_student["time_ms"]
 auto_acc = f'{auto_student["accuracy_pct"]:.1f}%' if auto_student["accuracy_pct"] is not None else "n/a"
 three_acc = f'{three_student["accuracy_pct"]:.1f}%' if three_student["accuracy_pct"] is not None else "n/a"
 lines.append(
     f"| Current deployed path | {auto_student['time_ms']:.1f} | {auto_student['std_ms']:.1f} | {auto_acc} | 1.00x |"
 )
+if relative >= 1.0:
+    relative_text = f"{relative:.2f}x slower vs current"
+else:
+    relative_text = f"{(1.0 / relative):.2f}x faster vs current"
 lines.append(
-    f"| Historical materialized-score path | {three_student['time_ms']:.1f} | {three_student['std_ms']:.1f} | {three_acc} | {speedup:.2f}x slower vs current |"
+    f"| Historical materialized-score path | {three_student['time_ms']:.1f} | {three_student['std_ms']:.1f} | {three_acc} | {relative_text} |"
 )
 lines.append("")
 lines.append("## Detailed Component Benchmark")

@@ -8,6 +8,7 @@ Usage:
     python benchmark_student.py glm_asr_cutile_template
     python benchmark_student.py glm_asr_triton_example
     python benchmark_student.py glm_asr_scratch
+    python benchmark_student.py <folder_name> --warmup-benchmarks 1 --benchmark-repeats 3
 """
 
 import argparse
@@ -585,13 +586,55 @@ def check_transcription(transcription, expected):
     return accuracy > 0.8, accuracy
 
 
+def aggregate_benchmark_runs(results_list):
+    """Aggregate multiple full benchmark passes after warmup."""
+    means = np.array([result['mean'] for result in results_list], dtype=np.float64)
+    stds = np.array([result['std'] for result in results_list], dtype=np.float64)
+    tokens = np.array([result['tokens'] for result in results_list], dtype=np.float64)
+
+    transcriptions = [result['transcription'] for result in results_list]
+    transcription = transcriptions[-1]
+    if transcriptions:
+        counts = {}
+        for item in transcriptions:
+            counts[item] = counts.get(item, 0) + 1
+        transcription = max(counts.items(), key=lambda item: (item[1], item[0] == transcriptions[-1]))[0]
+
+    return {
+        'mean': float(np.mean(means)),
+        'std': float(np.std(means)),
+        'inner_std_mean': float(np.mean(stds)),
+        'min': float(np.min(means)),
+        'max': float(np.max(means)),
+        'transcription': transcription,
+        'tokens': int(round(float(np.mean(tokens)))) if len(tokens) else 0,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description='Student version benchmark')
     parser.add_argument('folder', type=str, help='Folder name to benchmark (e.g., glm_asr_cutile_template)')
     parser.add_argument('--audio', type=str, help='Path to test audio file (wav/flac)')
     parser.add_argument('--warmup', type=int, default=1, help='Number of warmup runs')
     parser.add_argument('--runs', type=int, default=3, help='Number of benchmark runs')
+    parser.add_argument(
+        '--benchmark-repeats',
+        type=int,
+        default=1,
+        help='Number of full benchmark passes to keep and aggregate',
+    )
+    parser.add_argument(
+        '--warmup-benchmarks',
+        type=int,
+        default=0,
+        help='Number of full benchmark passes to discard before aggregation',
+    )
     args = parser.parse_args()
+
+    if args.benchmark_repeats < 1:
+        parser.error('--benchmark-repeats must be at least 1')
+    if args.warmup_benchmarks < 0:
+        parser.error('--warmup-benchmarks cannot be negative')
 
     print("=" * 70)
     print("GLM-ASR Student Version Benchmark")
@@ -614,15 +657,49 @@ def main():
 
     try:
         if is_scratch:
-            results = benchmark_scratch_folder(folder, audio_array, args.warmup, args.runs)
+            benchmark_fn = benchmark_scratch_folder
         elif is_triton:
-            results = benchmark_triton_folder(folder, audio_array, args.warmup, args.runs)
+            benchmark_fn = benchmark_triton_folder
         else:
-            results = benchmark_cutile_folder(folder, audio_array, args.warmup, args.runs)
+            benchmark_fn = benchmark_cutile_folder
+
+        total_passes = args.warmup_benchmarks + args.benchmark_repeats
+        measured_results = []
+
+        for pass_idx in range(total_passes):
+            is_warmup = pass_idx < args.warmup_benchmarks
+            label = (
+                "warmup, discarded"
+                if is_warmup
+                else f"measured {len(measured_results) + 1}/{args.benchmark_repeats}"
+            )
+            print("\n" + "=" * 70)
+            print(f"BENCHMARK PASS {pass_idx + 1}/{total_passes} ({label})")
+            print("=" * 70)
+
+            pass_results = benchmark_fn(folder, audio_array, args.warmup, args.runs)
+
+            if not is_warmup:
+                measured_results.append(pass_results)
+
+        if not measured_results:
+            raise ValueError("At least one measured benchmark pass is required.")
+
+        if len(measured_results) == 1:
+            results = measured_results[0]
+        else:
+            results = aggregate_benchmark_runs(measured_results)
 
         # Print results
         print("\n" + "=" * 70)
-        print("RESULTS")
+        if args.benchmark_repeats > 1 or args.warmup_benchmarks > 0:
+            print(
+                "AGGREGATED RESULTS "
+                f"({len(measured_results)} measured benchmark passes, "
+                f"{args.warmup_benchmarks} warmup discarded)"
+            )
+        else:
+            print("RESULTS")
         print("=" * 70)
         print(f"Time: {results['mean']:.1f}ms (+/- {results['std']:.1f}ms)")
         print(f"Tokens: {results['tokens']}")
