@@ -30,6 +30,10 @@
   }%
   \endgroup
 }
+\newcommand{\latestsource}[1]{%
+  \par\noindent
+  {\footnotesize \latestchglabel\ \parbox[t]{0.9\linewidth}{#1}}\par
+}
 
 \begin{document}
 \maketitle
@@ -204,6 +208,8 @@ Table~\ref{tab:e2e} summarizes the end-to-end results on the teaching cluster.  
 \end{tabular}
 \end{table}
 
+\latestsource{Source: \texttt{benchmarks/benchmarks.md}; script: \texttt{hw1-asr/benchmark\_student.py}; raw log: \texttt{logs/h200\_e2e\_2225992/benchmark\_raw\_output.txt}.}
+
 \subsection{Component/Operator-Level Breakdown}
 
 \chglabel\ \chg{Table~\ref{tab:e2e} measures end-to-end latency with KV-cached $O(n)$ generation (13 tokens).  Table~\ref{tab:detailed} profiles each component in isolation using \texttt{benchmark\_detailed.py}: individual forward passes through each stage with single-token decode steps (no KV history).  The detailed benchmark now uses 1 full warmup benchmark pass discarded and averages 3 measured benchmark passes, with 5 timed runs per component inside each pass.}
@@ -226,6 +232,8 @@ Table~\ref{tab:e2e} summarizes the end-to-end results on the teaching cluster.  
 \bottomrule
 \end{tabular}
 \end{table}
+
+\latestsource{Source: \texttt{benchmarks/benchmarks\_detailed.md}; script: \texttt{hw1-asr/benchmark\_detailed.py} via \texttt{hw1-asr/benchmark\_detailed\_job.sh}; raw logs: \texttt{logs/h200\_detailed\_2236079/}.}
 
 \chglabel\ \chg{Decoder decode now accounts for 92.1\% of the warmup-corrected isolated component total, at $\sim$0.41\,ms per layer per step, confirming that autoregressive generation remains the primary bottleneck even after optimization.}
 
@@ -357,6 +365,8 @@ MLP fusion off & 204.5 & $-$0.7 & Neutral (cuBLAS already fast) \\
 \end{tabular}
 \end{table}
 
+\latestsource{Source: \texttt{benchmarks/benchmarks\_ablation.md}; script: \texttt{hw1-asr/ablation\_test.py} via \texttt{hw1-asr/ablation\_job.sh}; generated artifacts: \texttt{hw1-asr/ablation\_results.\{json,md\}} and \texttt{hw1-asr/ablation\_output.log}.}
+
 \subsection{Kernel Fusion}\label{sec:fusion}
 
 \textbf{Hypothesis:} Fusing the SwiGLU pattern---$\text{SiLU}(\mathbf{x} \mathbf{W}_g) \odot (\mathbf{x} \mathbf{W}_u)$---into a single kernel eliminates two intermediate VRAM round-trips and three kernel launches per MLP layer.
@@ -377,6 +387,8 @@ Causal masking is handled via a compile-time \texttt{IS\_CAUSAL} flag that skips
 \textbf{Result:} \latestchglabel
 
 \latestchgblock{We later reintroduced the original 3-kernel path behind \texttt{GLM\_ASR\_ATTENTION\_MODE=three\_kernel} and benchmarked it against the current deployed path (\texttt{auto}: flash kernel for larger \texttt{seq\_q}, SDPA fallback for \texttt{seq\_q}$\leq$4) on the same H200 codebase.  In the warmup-corrected detailed benchmark, the current path reduces isolated component time from 651.51\,ms to 624.98\,ms (1.04$\times$), with lower prefill (13.37$\rightarrow$12.86\,ms) and 50-step decode cost (601.65$\rightarrow$575.64\,ms).  In the paired end-to-end student benchmark from the same job, however, the current path measured 219.8\,ms while the 3-kernel path measured 207.0\,ms.  We therefore treat this experiment as reproducible operator-level evidence rather than as a single universal end-to-end speedup result.  The clean end-to-end justification for keeping the SDPA fallback remains Table~\ref{tab:ablation}: disabling it costs +3.4\,ms.}
+
+\latestsource{Source: \texttt{benchmarks/benchmarks\_attention.md}; script: \texttt{hw1-asr/flash\_vs\_three\_kernel\_job.sh}; raw logs: \texttt{logs/h200\_attention\_2237998/}.}
 
 \subsection{Other Optimizations}
 
@@ -415,6 +427,8 @@ Example baseline & 464.1 & 35.70 & 100\% & 1.00$\times$ \\
 \end{tabular}
 \end{table}
 
+\latestsource{Source: \texttt{benchmarks/benchmarks.md}; script: \texttt{hw1-asr/benchmark\_student.py}; raw log: \texttt{logs/h200\_e2e\_2225992/benchmark\_raw\_output.txt}.}
+
 \subsection{Per-Operator Comparison}
 
 \chglabel\ \chg{Table~\ref{tab:peroperator} reports component-level timings on the H200 MIG~3g.71gb partition using \texttt{benchmark\_detailed.py} with one full warmup benchmark pass discarded and three measured benchmark passes averaged (each pass uses 5 timed runs per component).  These are isolated forward passes with 50 decode steps and \emph{no KV history}, so they measure steady-state operator latency rather than the algorithmic benefit of KV-cached generation.}
@@ -437,6 +451,8 @@ Example baseline & 464.1 & 35.70 & 100\% & 1.00$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\latestsource{Source: \texttt{benchmarks/benchmarks\_detailed.md}; script: \texttt{hw1-asr/benchmark\_detailed.py} via \texttt{hw1-asr/benchmark\_detailed\_job.sh}; raw logs: \texttt{logs/h200\_detailed\_2236079/}.}
 
 \subsection{Root Cause Analysis}
 
@@ -471,6 +487,8 @@ RTX~5090 (full) & 170 & 32\,GB & 100.4 & 262.2 & 2.61$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\latestsource{Source: H200 row from \texttt{benchmarks/benchmarks.md} (\texttt{logs/h200\_e2e\_2225992/benchmark\_raw\_output.txt}); RTX~5090 row from \texttt{benchmarks/benchmarks\_5090.md} (embedded transcript from \texttt{hw1-asr/benchmark\_student.py}).}
 
 \chglabel\ \chg{The RTX~5090 row in Table~\ref{tab:crossgpu_main} comes from a later confirmation rerun (100.4\,ms vs.\ 262.2\,ms), whereas Appendix Table~\ref{tab:progression} preserves the original development benchmark chain (261.3\,ms $\rightarrow$ 98.5\,ms).  We keep the full progression table on a single coherent benchmark session so that the per-step deltas remain meaningful.}
 
@@ -529,6 +547,8 @@ Autotune found \emph{worse} configs than hand-tuning (micro-benchmarks miss cach
 \end{tabular}
 \end{table}
 
+\latestsource{Source: \texttt{benchmarks/benchmarks\_history.md}; historical RTX~5090 development record extracted from pre-cleanup docs at branch base \texttt{f8c2f36}.}
+
 \subsection{Rejected Optimizations}
 
 \begin{table}[h]
@@ -546,6 +566,32 @@ Flash Attn \texttt{num\_stages}=2 & Crash & RTX~5090 99\,KB cannot hold two tile
 SDPA for all attention & +6\,ms & Custom kernel faster for long sequences \\
 SDPA \texttt{enable\_gqa} & +13\,ms & Manual KV expansion is faster \\
 Warmup autotune & +3.1\,ms & Micro-benchmarks chose suboptimal configs \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\latestsource{Source: \texttt{benchmarks/benchmarks\_history.md}; historical RTX~5090 development record extracted from pre-cleanup docs at branch base \texttt{f8c2f36}.}
+
+\subsection{Benchmark Source Map}
+
+\latestchgblock{Table~\ref{tab:benchmap} provides a direct trace from the main benchmark-backed report claims to their canonical benchmark documents, scripts, and raw artifacts.  The intended lookup path is: report table $\rightarrow$ canonical benchmark doc $\rightarrow$ script/runner $\rightarrow$ raw artifact or generated result file.}
+
+\begin{table}[h]
+\centering
+\caption{\latestchglabel\ Benchmark source map for the main report claims.}
+\label{tab:benchmap}
+\small
+\begin{tabular}{@{}p{0.18\linewidth}p{0.18\linewidth}p{0.24\linewidth}p{0.26\linewidth}@{}}
+\toprule
+\textbf{Report element} & \textbf{Canonical doc} & \textbf{Script / runner} & \textbf{Artifact} \\
+\midrule
+\texttt{tab:e2e}, \texttt{tab:comparison} & \texttt{benchmarks.md} & \texttt{benchmark\_student.py} & \texttt{logs/h200\_e2e\_2225992/...} \\
+\texttt{tab:detailed}, \texttt{tab:peroperator} & \texttt{benchmarks\_detailed.md} & \texttt{benchmark\_detailed.py} / \texttt{benchmark\_detailed\_job.sh} & \texttt{logs/h200\_detailed\_2236079/...} \\
+\texttt{tab:ablation} & \texttt{benchmarks\_ablation.md} & \texttt{ablation\_test.py} / \texttt{ablation\_job.sh} & \texttt{hw1-asr/ablation\_results.\{json,md\}} \\
+\texttt{tab:crossgpu\_main} (H200) & \texttt{benchmarks.md} & \texttt{benchmark\_student.py} & \texttt{logs/h200\_e2e\_2225992/...} \\
+\texttt{tab:crossgpu\_main} (RTX~5090) & \texttt{benchmarks\_5090.md} & \texttt{benchmark\_student.py} & embedded transcript \\
+Section~5.3 & \texttt{benchmarks\_attention.md} & \texttt{flash\_vs\_three\_kernel\_job.sh} & \texttt{logs/h200\_attention\_2237998/...} \\
+\texttt{tab:progression}, \texttt{tab:rejected} & \texttt{benchmarks\_history.md} & historical development runs & extracted history at \texttt{f8c2f36} \\
 \bottomrule
 \end{tabular}
 \end{table}
