@@ -29,6 +29,17 @@ modes:
 That design keeps GQA expansion, KV cache logic, and the rest of the pipeline
 fixed while changing only the attention backend.
 
+Important clarification: `auto` is not "flash everywhere." It is the runtime
+mode the actual model uses in deployment:
+
+- if `seq_q <= 4`, it routes to PyTorch SDPA to reduce launch overhead in the
+  tiny KV-cached decode regime
+- otherwise it routes to the fused Triton flash-attention kernel
+
+So the Section 5.3 benchmark compares the real deployed mixed dispatch against
+the reintroduced 3-kernel/materialized-score path, not "pure flash-only"
+against 3-kernel.
+
 ## Raw Artifacts
 
 - [job_metadata.txt](../logs/h200_attention_2238022/job_metadata.txt)
