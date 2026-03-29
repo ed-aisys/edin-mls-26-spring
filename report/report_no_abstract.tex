@@ -271,6 +271,8 @@ RoPE & $\sim$0.5 & Bandwidth & 6 FLOPs / 12 bytes per elem \\
 \end{tabular}
 \end{table}
 
+\latestsource{Source: \texttt{docs/ai\_manual\_calculation.md} for the analytic FLOP/byte derivations behind the Table~\ref{tab:ai} values; \texttt{docs/ai\_calculations\_with\_nsight\_validation.md} for the H200 ridge-point calculation and Nsight Systems cross-checks.}
+
 Flash attention dramatically increases encoder attention AI from $\sim$16 (3-kernel pipeline, which materializes the score matrix) to $\sim$112 (fused, score matrix stays in SRAM).  Both are compute-bound on the H200 (ridge=12.7), but on consumer GPUs (RTX~5090, ridge$\approx$58.5) the 3-kernel pipeline would be bandwidth-bound while flash attention remains compute-bound.  Decode-time attention (AI$\sim$1.0) is bandwidth-bound on all architectures due to the single-row query against the full KV cache.
 
 \subsection{Overall Bottleneck}

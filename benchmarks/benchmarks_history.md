@@ -58,6 +58,31 @@ kept on one coherent benchmark session.
 | SDPA `enable_gqa=True` | `+13 ms` | Rejected |
 | Runtime warmup autotune | `+3.1 ms` | Rejected |
 
+## Branch Attribution For Rejected Rows
+
+The appendix rejected-optimization rows are still `history-backed`, but a sweep
+across `origin/meave`, `origin/majed`, and `origin/yash/optimize` helps pin
+down which historical branch introduced or motivated each test:
+
+| Optimization | Branch / commit evidence | Notes |
+|-------------|---------------------------|-------|
+| SwiGLU grid swizzling (`GROUP_SIZE_M=8`) | `origin/yash/optimize`, commit `5d5bc8a` | Preserved on cleanup branch in `docs/design_choices.md` as `+18 ms` regression after adding swizzling. |
+| `@triton.autotune` for GELU / SiLU | `origin/majed`, commit `893eb35` | Preserved on cleanup branch in `docs/design_choices.md` as `+0.7 ms` tuning overhead. |
+| Flash attention `num_stages=2` on RTX 5090 | historically associated with the Yash tuning branch | Preserved on cleanup branch in `docs/design_choices.md` as “kernel won't launch” / consumer shared-memory limit. |
+| PyTorch SDPA for all attention | historical local test, preserved on cleanup branch | Preserved on cleanup branch in `docs/design_choices.md` as `+6 ms` for encoder/prefill. |
+| SDPA `enable_gqa=True` | historical local test, preserved on cleanup branch | Preserved on cleanup branch in `docs/design_choices.md` as `+13 ms`. |
+| Runtime warmup autotune | Ankush local development, removal commit `8611863` | Preserved on cleanup branch in `docs/design_choices.md` as `101.6 ms` vs `98.5 ms` (`+3.1 ms`). |
+
+## Sweep Result
+
+- `origin/meave`: no additional rejected-optimization benchmark evidence was
+  found beyond general benchmark utilities and implementation files.
+- `origin/majed`: useful for attributing the lightweight `@triton.autotune`
+  rejection to commit `893eb35`.
+- `origin/yash/optimize`: useful for attributing the swizzling regression to
+  commit `5d5bc8a`, and for tying the aggressive attention tuning context to the
+  `num_stages=2` rejection on consumer GPUs.
+
 ## Report Use
 
 Use this file only for:
