@@ -14,8 +14,8 @@
 
 set -euo pipefail
 
-REPO_DIR="/home/s2884198/edin-mls-26-spring"
-HW1_DIR="$REPO_DIR/hw1-asr"
+HW1_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$HW1_DIR/.." && pwd)"
 RUN_DIR="$HW1_DIR/benchmark_runs/detailed_${SLURM_JOB_ID}"
 DOC_COPY="$REPO_DIR/docs/h200_detailed_component_benchmark_job_${SLURM_JOB_ID}.md"
 

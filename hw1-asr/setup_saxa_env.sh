@@ -8,8 +8,12 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     exit 1
 fi
 
-MLS_REPO_DIR="${MLS_REPO_DIR:-/home/s2884198/edin-mls-26-spring}"
-MLS_HW1_DIR="${MLS_HW1_DIR:-$MLS_REPO_DIR/hw1-asr}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_HW1_DIR="$SCRIPT_DIR"
+DEFAULT_REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+MLS_REPO_DIR="${MLS_REPO_DIR:-$DEFAULT_REPO_DIR}"
+MLS_HW1_DIR="${MLS_HW1_DIR:-$DEFAULT_HW1_DIR}"
 MLS_RUN_DIR_INPUT="${1:-${MLS_RUN_DIR:-$MLS_HW1_DIR/.runtime}}"
 MLS_RUN_DIR="$MLS_RUN_DIR_INPUT"
 

@@ -67,11 +67,11 @@ For cluster reproduction on `saxa`, source the small runtime helper from the
 repo root:
 
 ```bash
-source hw1-asr/setup_saxa_env.sh /home/s2884198/edin-mls-26-spring/hw1-asr/.repro_env
+source hw1-asr/setup_saxa_env.sh ./hw1-asr/.repro_env
 ```
 
 That helper does not install packages. It codifies the runtime environment we
-actually used for H200 jobs:
+actually used for H200 jobs, relative to the current checkout:
 
 - `PATH=/home/s2884198/.conda/envs/mls/bin:$PATH`
 - `HF_HOME=/home/s2884198/.cache/huggingface`
