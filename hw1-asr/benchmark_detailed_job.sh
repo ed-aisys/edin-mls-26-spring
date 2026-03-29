@@ -18,21 +18,12 @@ REPO_DIR="/home/s2884198/edin-mls-26-spring"
 HW1_DIR="$REPO_DIR/hw1-asr"
 RUN_DIR="$HW1_DIR/benchmark_runs/detailed_${SLURM_JOB_ID}"
 DOC_COPY="$REPO_DIR/docs/h200_detailed_component_benchmark_job_${SLURM_JOB_ID}.md"
-TMP_ROOT="$RUN_DIR/tmp"
-TRITON_CACHE_DIR="$RUN_DIR/triton_cache"
-TORCH_EXTENSIONS_DIR="$RUN_DIR/torch_extensions"
 
 mkdir -p "$RUN_DIR"
 cd "$HW1_DIR"
 
-export PATH="/home/s2884198/.conda/envs/mls/bin:$PATH"
-export HF_HOME="/home/s2884198/.cache/huggingface"
-mkdir -p "$TMP_ROOT" "$TRITON_CACHE_DIR" "$TORCH_EXTENSIONS_DIR"
-export TMPDIR="$TMP_ROOT"
-export TMP="$TMP_ROOT"
-export TEMP="$TMP_ROOT"
-export TRITON_CACHE_DIR="$TRITON_CACHE_DIR"
-export TORCH_EXTENSIONS_DIR="$TORCH_EXTENSIONS_DIR"
+# Shared Saxa/H200 runtime environment used by the canonical report jobs.
+source "$HW1_DIR/setup_saxa_env.sh" "$RUN_DIR"
 
 COMPONENT_RUNS=5
 WARMUP_BENCHMARKS=1

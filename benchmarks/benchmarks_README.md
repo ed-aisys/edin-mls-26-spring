@@ -3,6 +3,9 @@
 This folder is the canonical entry point for benchmark evidence used by
 `report/report_no_abstract.tex`.
 
+For project-level setup and reproduction instructions, start with
+`../PROJECT_README.md`. This file stays focused on benchmark provenance.
+
 ## Canonical Benchmark Docs
 
 | File | Purpose | Evidence Type | Supports |
@@ -43,6 +46,14 @@ This folder is the canonical entry point for benchmark evidence used by
 | `../hw1-asr/nsys_profile.sh` | Supplementary | Nsight Systems profiling | `.nsys-rep` / `.sqlite` outputs | Not a benchmark source of record |
 | `../hw1-asr/ncu_profile.py` | Supplementary | Nsight Compute profiling | Nsight Compute output | Not a benchmark source of record |
 | `../hw1-asr/ncu_job.sh` | Supplementary | Batch wrapper for Nsight Compute profiling | Batch logs / profiler outputs | Not a benchmark source of record |
+
+## Reproduction Helper Files
+
+| File | Purpose |
+|------|---------|
+| `../PROJECT_README.md` | Project-level reproduction guide for the cleaned-up report branch |
+| `../hw1-asr/setup_saxa_env.sh` | Small Saxa/H200 runtime environment helper used by the canonical H200 job wrappers |
+| `../hw1-asr/run_report_benchmarks.sh` | Thin wrapper that runs or submits the exact report benchmark entry points |
 
 ## Removed or Superseded Sources
 

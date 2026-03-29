@@ -2,6 +2,13 @@
 
 Welcome to the Machine Learning Systems course at the University of Edinburgh (Spring 2026). This repository contains GPU programming tutorials and assignments designed to teach you how to write efficient GPU kernels for machine learning workloads.
 
+## Final Project Reproduction
+
+For the cleaned-up final report branch and the exact benchmark reproduction
+paths, start with [PROJECT_README.md](PROJECT_README.md). The benchmark
+provenance map used by the report lives in
+[benchmarks/benchmarks_README.md](benchmarks/benchmarks_README.md).
+
 ## Quick Start
 
 ### Triton Track
