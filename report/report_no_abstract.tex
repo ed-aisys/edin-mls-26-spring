@@ -600,32 +600,29 @@ Section~5.3 & \texttt{benchmarks\_attention.md} & \texttt{flash\_vs\_three\_kern
 
 \subsection{Code Map}
 
+\latestchglabel
+
+\latestchgblock{Following the C4 model's idea of creating ``maps of your code'' through progressively higher-level abstractions, and arc42's level-1 building-block view, Table~\ref{tab:codemap} groups the supplementary code by building block, responsibility, and primary source location rather than listing every kernel symbol individually.  This gives a grader a top-down navigation aid first; Table~\ref{tab:benchmap} then provides the trace from report claims to benchmark scripts and artifacts.}
+
 \begin{table}[h]
 \centering
-\caption{Key implementation locations in the supplementary code.}
+\caption{\latestchglabel\ Level-1 building-block map of the supplementary code.}
 \label{tab:codemap}
 \small
-\begin{tabular}{@{}lll@{}}
+\begin{tabular}{@{}p{0.17\linewidth}p{0.31\linewidth}p{0.30\linewidth}p{0.14\linewidth}@{}}
 \toprule
-\textbf{Component} & \textbf{File} & \textbf{Line} \\
+\textbf{Building block} & \textbf{Responsibility} & \textbf{Primary files / entry points} & \textbf{Report use} \\
 \midrule
-\texttt{\_KNOWN\_CONFIGS} (tile configs) & layers.py & 23 \\
-\texttt{GPUProfile} (arch detection) & layers.py & 89 \\
-\texttt{\_compute\_attention\_tiles} & layers.py & 206 \\
-\texttt{rmsnorm\_kernel} / \texttt{rmsnorm\_bf16\_kernel} & layers.py & 308 / 339 \\
-\texttt{layernorm\_kernel} & layers.py & 368 \\
-\texttt{gelu\_kernel} / \texttt{silu\_kernel} & layers.py & 403 / 418 \\
-\texttt{linear\_kernel\_tf32} & layers.py & 430 \\
-\texttt{linear\_gelu\_kernel} (fused) & layers.py & 485 \\
-\texttt{swiglu\_fused\_kernel} & layers.py & 546 \\
-\texttt{\_generate\_v8b} (KV cache) & layers.py & 1381 \\
-\texttt{\_try\_patch\_v8b} (monkey-patch) & layers.py & 1482 \\
-\texttt{flash\_attention\_kernel} & attention.py & 34 \\
-\texttt{scaled\_dot\_product\_attention} & attention.py & 237 \\
-\texttt{fused\_rope\_pair\_kernel} & rope.py & 189 \\
-\texttt{apply\_rotary\_pos\_emb} & rope.py & 296 \\
+Benchmark harness & Runs the end-to-end, detailed, ablation, and attention-backend experiments; writes the logs that feed the benchmark documents. & \texttt{benchmark\_student.py}, \texttt{benchmark\_detailed.py}, \texttt{ablation\_test.py}, \texttt{flash\_vs\_three\_kernel\_job.sh} & Tables~\ref{tab:e2e}, \ref{tab:detailed}, \ref{tab:ablation}; Sec.~5.3 \\
+Optimized template runtime & Selects GPU-specific tile/configuration choices, wires the fused Triton kernels into the Hugging Face model, and implements KV-cached generation. & \texttt{template/layers.py}: \texttt{GPUProfile}, \texttt{\_compute\_attention\_tiles}, \texttt{\_generate\_v8b}, \texttt{\_try\_patch\_v8b} & Secs.~3--5, conclusion \\
+Attention subsystem & Implements the main attention dispatch: FlashAttention for long sequences, SDPA fallback for tiny decode steps, and the reintroduced 3-kernel path for controlled comparison. & \texttt{template/attention.py}: \texttt{flash\_attention\_kernel}, \texttt{scaled\_dot\_product\_attention} & Sec.~5.3, Table~\ref{tab:peroperator} \\
+RoPE subsystem & Applies rotary position embeddings with a fused kernel path and the runtime wrapper used by the decoder. & \texttt{template/rope.py}: \texttt{fused\_rope\_pair\_kernel}, \texttt{apply\_rotary\_pos\_emb} & Kernel-fusion discussion, appendix \\
+Baseline reference implementation & Provides the comparison target for end-to-end and per-operator speedups against our optimized template. & \texttt{example/layers.py}, \texttt{example/attention.py}, \texttt{example/rope.py} & Tables~\ref{tab:comparison}, \ref{tab:peroperator}, \ref{tab:crossgpu_main} \\
+Evidence bundle & Stores the canonical benchmark writeups and the pulled raw H200 artifacts used to trace report numbers back to scripts and runs. & \texttt{benchmarks/*.md}, \texttt{logs/h200\_*} & Appendix A.2--A.3 \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\latestsource{Structure based on two documentation patterns: the C4 model's abstraction-first ``maps of your code'' and arc42's level-1 building-block/source-mapping guidance.  In practice, that means naming a small set of coherent building blocks, stating each block's responsibility, and pointing to the 2--3 most important source locations rather than dumping a flat symbol list.}
 
 \end{document}
