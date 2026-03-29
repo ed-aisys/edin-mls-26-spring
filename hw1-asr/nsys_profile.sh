@@ -1,11 +1,13 @@
 #!/bin/bash
-# Nsight Systems profiling for GLM-ASR on H200 MIG
-# Usage: srun -p Teaching -w saxa --gres gpu:3g.71gb:1 --mem=32G --time=00:30:00 bash nsys_profile.sh
+# Nsight Systems profiling for GLM-ASR.
+# Usage: allocate a GPU node, then run this script from hw1-asr/.
 
-set -e
+set -euo pipefail
 
-source activate mls 2>/dev/null || conda activate mls 2>/dev/null || true
-export HF_HOME=/home/s2884198/.cache/huggingface
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUN_DIR="$SCRIPT_DIR/.nsys_runtime_$(date +%Y%m%d_%H%M%S)"
+source "$SCRIPT_DIR/setup_saxa_env.sh" "$RUN_DIR"
+cd "$SCRIPT_DIR"
 
 PROFILE_DIR="../nsys_profiles/h200_ablation_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$PROFILE_DIR"

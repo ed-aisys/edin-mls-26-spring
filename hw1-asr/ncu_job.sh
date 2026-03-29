@@ -1,21 +1,23 @@
 #!/bin/bash
 #SBATCH --job-name=ncu-profile
-#SBATCH --partition=Teaching
-#SBATCH --nodelist=saxa
-#SBATCH --gres=gpu:3g.71gb:1
 #SBATCH --mem=32G
 #SBATCH --time=01:00:00
 #SBATCH --output=ncu_slurm_%j.log
 #SBATCH --error=ncu_slurm_%j.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=ankushburman.ab@gmail.com
 
-set -e
+set -euo pipefail
 
-cd /home/s2884198/edin-mls-26-spring/hw1-asr
+HW1_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+JOB_TOKEN="${SLURM_JOB_ID:-local_$(date +%Y%m%d_%H%M%S)}"
+RUN_DIR="$HW1_DIR/ncu_runs/ncu_${JOB_TOKEN}"
+mkdir -p "$RUN_DIR"
+cd "$HW1_DIR"
 
-export PATH="/home/s2884198/.conda/envs/mls/bin:/usr/local/cuda/bin:$PATH"
-export HF_HOME=/home/s2884198/.cache/huggingface
+source "$HW1_DIR/setup_saxa_env.sh" "$RUN_DIR"
+CUDA_BIN="${MLS_CUDA_BIN:-/usr/local/cuda/bin}"
+if [[ -d "$CUDA_BIN" ]]; then
+    export PATH="$CUDA_BIN:$PATH"
+fi
 
 echo "=== Nsight Compute Profiling ==="
 echo "Date: $(date)"
@@ -45,16 +47,17 @@ gpu__time_duration.sum \
     --target-processes all \
     --kernel-name-base function \
     --csv \
-    python3 ncu_profile.py 2>&1 | tee ncu_raw_output.csv
+    python3 ncu_profile.py 2>&1 | tee "$RUN_DIR/ncu_raw_output.csv"
 
 echo ""
 echo "[2/2] Parsing results..."
 
-python3 << 'PYEOF'
+python3 - "$RUN_DIR/ncu_raw_output.csv" << 'PYEOF'
 import csv
 import io
+import sys
 
-with open("ncu_raw_output.csv", "r") as f:
+with open(sys.argv[1], "r") as f:
     content = f.read()
 
 lines = content.split("\n")
@@ -108,4 +111,4 @@ PYEOF
 
 echo ""
 echo "=== Done ==="
-echo "Raw output: ncu_raw_output.csv"
+echo "Raw output: $RUN_DIR/ncu_raw_output.csv"

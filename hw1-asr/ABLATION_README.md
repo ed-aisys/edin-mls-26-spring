@@ -7,19 +7,14 @@ running the ablation script itself.
 ## Quick Start
 
 ```bash
-# On the Edinburgh teaching cluster (hastings login node)
 cd ~/edin-mls-26-spring/hw1-asr
 
-# Option 1: Interactive (you wait for it)
-srun -p Teaching -w saxa --gres gpu:3g.71gb:1 --mem=32G --time=02:00:00 bash -c "
-    export PATH=/home/\$USER/.conda/envs/mls/bin:\$PATH
-    export HF_HOME=/home/\$USER/.cache/huggingface
-    python3 ablation_test.py
-"
+# Option 1: Interactive (after you allocate a GPU node)
+source ./setup_saxa_env.sh ./.ablation_runtime
+python3 ablation_test.py
 
-# Option 2: Batch job with email notification
-# Edit ablation_job.sh to set your email, then:
-sbatch ablation_job.sh
+# Option 2: Batch job
+MLS_PARTITION=gpu MLS_GRES=gpu:1 sbatch ablation_job.sh
 ```
 
 ## What It Does

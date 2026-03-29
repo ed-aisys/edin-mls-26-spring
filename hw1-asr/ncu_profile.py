@@ -7,7 +7,7 @@ import os
 import sys
 import torch
 
-os.environ["HF_HOME"] = "/home/s2884198/.cache/huggingface"
+os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 print("Loading model...")

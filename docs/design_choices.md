@@ -2,7 +2,7 @@
 
 Implementation-focused reference for the GLM-ASR speech recognition model optimization. Covers what was chosen, why (with benchmark data), and how it maps to code.
 
-> Benchmark evidence on this cleanup branch is canonicalized under
+> Benchmark evidence on this submission branch is canonicalized under
 > `benchmarks/`. Treat benchmark numbers in this file as design-history context;
 > use `benchmarks/benchmark_provenance.md` to find the source-of-record for any
 > report number.

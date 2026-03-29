@@ -23,6 +23,15 @@ Targets:
   h200-detailed   Submit the canonical H200 detailed benchmark job with sbatch
   h200-ablation   Submit the canonical H200 ablation job with sbatch
   h200-attention  Submit the canonical Section 5.3 attention job with sbatch
+
+Optional environment overrides for sbatch targets:
+  MLS_PARTITION   Slurm partition (for example: gpu, Teaching)
+  MLS_NODELIST    Specific node list
+  MLS_GRES        GPU request (for example: gpu:1 or gpu:3g.71gb:1)
+  MLS_MEM         Memory request
+  MLS_TIME        Wall-clock limit
+  MLS_MAIL_TYPE   Slurm mail type
+  MLS_MAIL_USER   Slurm mail recipient
 EOF
 }
 
@@ -50,6 +59,17 @@ ensure_sbatch() {
         echo "sbatch is required for this target." >&2
         exit 1
     fi
+}
+
+build_sbatch_args() {
+    SBATCH_ARGS=()
+    [[ -n "${MLS_PARTITION:-}" ]] && SBATCH_ARGS+=(--partition "$MLS_PARTITION")
+    [[ -n "${MLS_NODELIST:-}" ]] && SBATCH_ARGS+=(--nodelist "$MLS_NODELIST")
+    [[ -n "${MLS_GRES:-}" ]] && SBATCH_ARGS+=(--gres "$MLS_GRES")
+    [[ -n "${MLS_MEM:-}" ]] && SBATCH_ARGS+=(--mem "$MLS_MEM")
+    [[ -n "${MLS_TIME:-}" ]] && SBATCH_ARGS+=(--time "$MLS_TIME")
+    [[ -n "${MLS_MAIL_TYPE:-}" ]] && SBATCH_ARGS+=(--mail-type "$MLS_MAIL_TYPE")
+    [[ -n "${MLS_MAIL_USER:-}" ]] && SBATCH_ARGS+=(--mail-user "$MLS_MAIL_USER")
 }
 
 run_h200_e2e() {
@@ -106,18 +126,21 @@ case "$1" in
         ;;
     h200-detailed)
         ensure_sbatch
+        build_sbatch_args
         cd "$SCRIPT_DIR"
-        sbatch benchmark_detailed_job.sh
+        sbatch "${SBATCH_ARGS[@]}" benchmark_detailed_job.sh
         ;;
     h200-ablation)
         ensure_sbatch
+        build_sbatch_args
         cd "$SCRIPT_DIR"
-        sbatch ablation_job.sh
+        sbatch "${SBATCH_ARGS[@]}" ablation_job.sh
         ;;
     h200-attention)
         ensure_sbatch
+        build_sbatch_args
         cd "$SCRIPT_DIR"
-        sbatch flash_vs_three_kernel_job.sh
+        sbatch "${SBATCH_ARGS[@]}" flash_vs_three_kernel_job.sh
         ;;
     -h|--help|help)
         usage

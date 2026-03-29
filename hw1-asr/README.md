@@ -1,7 +1,7 @@
 # GLM-ASR Student Assignment
 
 > Final project note:
-> On the cleaned-up report branch, use `../PROJECT_README.md` for the
+> On the submission branch, use `../PROJECT_README.md` for the
 > project-level reproduction path and `../benchmarks/benchmarks_README.md` for
 > benchmark provenance. This README remains the assignment-level guide.
 

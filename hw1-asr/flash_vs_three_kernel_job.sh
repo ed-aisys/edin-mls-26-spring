@@ -2,22 +2,18 @@
 # Canonical Section 5.3 source: ../benchmarks/benchmarks_attention.md
 # Raw outputs: attention_mode_runs/flash_vs_three_kernel_<jobid>/...
 #SBATCH --job-name=flash-3kernel
-#SBATCH --partition=Teaching
-#SBATCH --nodelist=saxa
-#SBATCH --gres=gpu:3g.71gb:1
 #SBATCH --mem=32G
 #SBATCH --time=02:00:00
 #SBATCH --output=flash_vs_three_kernel_%j.log
 #SBATCH --error=flash_vs_three_kernel_%j.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=ankushburman.ab@gmail.com
 
 set -euo pipefail
 
 HW1_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$HW1_DIR/.." && pwd)"
-RUN_DIR="$HW1_DIR/attention_mode_runs/flash_vs_three_kernel_${SLURM_JOB_ID}"
-DOC_COPY="$REPO_DIR/docs/flash_vs_three_kernel_job_${SLURM_JOB_ID}.md"
+JOB_TOKEN="${SLURM_JOB_ID:-local_$(date +%Y%m%d_%H%M%S)}"
+RUN_DIR="$HW1_DIR/attention_mode_runs/flash_vs_three_kernel_${JOB_TOKEN}"
+DOC_COPY="$REPO_DIR/docs/flash_vs_three_kernel_job_${JOB_TOKEN}.md"
 
 mkdir -p "$RUN_DIR"
 cd "$HW1_DIR"
@@ -133,7 +129,7 @@ lines = []
 lines.append("# Flash Attention vs Materialized-Score Attention")
 lines.append("")
 lines.append(f"- Job ID: `{run_dir.name.split('_')[-1]}`")
-lines.append("- GPU: H200 MIG 3g.71gb on `saxa`")
+lines.append("- Hardware: see `job_metadata.txt` for the runtime GPU and host.")
 lines.append("- Target report section: `Section 5.3 (FlashAttention-Style Attention)`")
 lines.append("- Config A: `GLM_ASR_ATTENTION_MODE=auto`")
 lines.append("  Current deployed path: flash kernel for seq_q > 4, SDPA fallback for seq_q <= 4.")

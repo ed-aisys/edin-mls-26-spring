@@ -40,7 +40,7 @@ For project-level setup and reproduction instructions, start with
 | `../hw1-asr/benchmark_detailed.sh` | Wrapper | Shell wrapper for `benchmark_detailed.py` | Console transcript only unless redirected | `benchmarks_detailed.md` |
 | `../hw1-asr/benchmark_detailed_job.sh` | Authoritative batch wrapper | H200 detailed/component benchmark with discarded warmup benchmark pass | `benchmark_runs/detailed_<jobid>/...` and parsed summaries | `benchmarks_detailed.md` |
 | `../hw1-asr/ablation_test.py` | Authoritative | H200 ablation study across 22 configurations | `ablation_results.json`, `ablation_results.md`, `ablation_output.log` | `benchmarks_ablation.md` |
-| `../hw1-asr/ablation_job.sh` | Authoritative batch wrapper | Batch execution of `ablation_test.py` on Saxa | `ablation_slurm_<jobid>.{log,err}` plus generated ablation files | `benchmarks_ablation.md` |
+| `../hw1-asr/ablation_job.sh` | Authoritative batch wrapper | Batch execution of `ablation_test.py` on a Slurm GPU node | `ablation_slurm_<jobid>.{log,err}` plus generated ablation files | `benchmarks_ablation.md` |
 | `../hw1-asr/flash_vs_three_kernel_job.sh` | Authoritative for Section 5.3 | Same-codebase comparison of `GLM_ASR_ATTENTION_MODE=auto` vs `three_kernel` | `attention_mode_runs/flash_vs_three_kernel_<jobid>/...` | `benchmarks_attention.md` |
 | `../hw1-asr/flash_ablation_test.sh` | Historical exploratory | Flash/SDPA ablation on H200 by forcing all attention through SDPA | Local log files inside `hw1-asr/` | Historical note inside `benchmarks_attention.md` |
 | `../hw1-asr/nsys_profile.sh` | Supplementary | Nsight Systems profiling | `.nsys-rep` / `.sqlite` outputs | Not a benchmark source of record |
@@ -51,8 +51,8 @@ For project-level setup and reproduction instructions, start with
 
 | File | Purpose |
 |------|---------|
-| `../PROJECT_README.md` | Project-level reproduction guide for the cleaned-up report branch |
-| `../hw1-asr/setup_saxa_env.sh` | Small Saxa/H200 runtime environment helper used by the canonical H200 job wrappers |
+| `../PROJECT_README.md` | Project-level reproduction guide for the submission branch |
+| `../hw1-asr/setup_saxa_env.sh` | Small checkout-relative runtime environment helper used by the canonical benchmark wrappers |
 | `../hw1-asr/run_report_benchmarks.sh` | Thin wrapper that runs or submits the exact report benchmark entry points |
 
 ## Removed or Superseded Sources

@@ -2,9 +2,6 @@
 # Canonical output doc: ../benchmarks/benchmarks_ablation.md
 # Generated outputs: ablation_results.json, ablation_results.md, ablation_output.log
 #SBATCH --job-name=ablation
-#SBATCH --partition=Teaching
-#SBATCH --nodelist=saxa
-#SBATCH --gres=gpu:3g.71gb:1
 #SBATCH --mem=32G
 #SBATCH --time=02:00:00
 #SBATCH --output=ablation_slurm_%j.log
@@ -14,7 +11,8 @@ set -euo pipefail
 
 HW1_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$HW1_DIR/.." && pwd)"
-RUN_DIR="$HW1_DIR/ablation_runs/ablation_${SLURM_JOB_ID}"
+JOB_TOKEN="${SLURM_JOB_ID:-local_$(date +%Y%m%d_%H%M%S)}"
+RUN_DIR="$HW1_DIR/ablation_runs/ablation_${JOB_TOKEN}"
 
 mkdir -p "$RUN_DIR"
 cd "$HW1_DIR"

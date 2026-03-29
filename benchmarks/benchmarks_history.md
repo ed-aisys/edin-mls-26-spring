@@ -64,12 +64,12 @@ across branches helps pin down which historical branch introduced or motivated e
 
 | Optimization | Source | Notes |
 |-------------|---------------------------|-------|
-| SwiGLU grid swizzling (`GROUP_SIZE_M=8`) | person4 | Preserved on cleanup branch in `docs/design_choices.md` as `+18 ms` regression after adding swizzling. |
-| `@triton.autotune` for GELU / SiLU | person2 | Preserved on cleanup branch in `docs/design_choices.md` as `+0.7 ms` tuning overhead. |
-| Flash attention `num_stages=2` on RTX 5090 | historically associated with the Person4 tuning branch | Preserved on cleanup branch in `docs/design_choices.md` as “kernel won't launch” / consumer shared-memory limit. |
-| PyTorch SDPA for all attention | historical local test, preserved on cleanup branch | Preserved on cleanup branch in `docs/design_choices.md` as `+6 ms` for encoder/prefill. |
-| SDPA `enable_gqa=True` | historical local test, preserved on cleanup branch | Preserved on cleanup branch in `docs/design_choices.md` as `+13 ms`. |
-| Runtime warmup autotune | person1 | Preserved on cleanup branch in `docs/design_choices.md` as `101.6 ms` vs `98.5 ms` (`+3.1 ms`). |
+| SwiGLU grid swizzling (`GROUP_SIZE_M=8`) | person4 | Preserved on this submission branch in `docs/design_choices.md` as `+18 ms` regression after adding swizzling. |
+| `@triton.autotune` for GELU / SiLU | person2 | Preserved on this submission branch in `docs/design_choices.md` as `+0.7 ms` tuning overhead. |
+| Flash attention `num_stages=2` on RTX 5090 | historically associated with the Person4 tuning branch | Preserved on this submission branch in `docs/design_choices.md` as “kernel won't launch” / consumer shared-memory limit. |
+| PyTorch SDPA for all attention | historical local test, preserved on this submission branch | Preserved on this submission branch in `docs/design_choices.md` as `+6 ms` for encoder/prefill. |
+| SDPA `enable_gqa=True` | historical local test, preserved on this submission branch | Preserved on this submission branch in `docs/design_choices.md` as `+13 ms`. |
+| Runtime warmup autotune | person1 | Preserved on this submission branch in `docs/design_choices.md` as `101.6 ms` vs `98.5 ms` (`+3.1 ms`). |
 
 ## Sweep Result
 

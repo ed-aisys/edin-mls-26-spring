@@ -66,7 +66,7 @@ def run_benchmark():
     result = subprocess.run(
         [sys.executable, "benchmark_student.py", "glm_asr_triton_template"],
         capture_output=True, text=True, timeout=600,
-        env={**os.environ, "HF_HOME": os.environ.get("HF_HOME", "/home/s2884198/.cache/huggingface")}
+        env={**os.environ, "HF_HOME": os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))}
     )
     output = result.stdout + result.stderr
 

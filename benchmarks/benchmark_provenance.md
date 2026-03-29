@@ -1,7 +1,7 @@
 # Report Benchmark Provenance
 
 This file maps benchmark-backed claims in `report/report_no_abstract.tex` to
-their exact evidence path on the cleanup branch.
+their exact evidence path on the submission branch.
 
 ## Evidence Type Legend
 

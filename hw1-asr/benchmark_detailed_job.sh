@@ -2,9 +2,6 @@
 # Canonical output doc: ../benchmarks/benchmarks_detailed.md
 # Raw outputs: benchmark_runs/detailed_<jobid>/...
 #SBATCH --job-name=detailed-bench
-#SBATCH --partition=Teaching
-#SBATCH --nodelist=saxa
-#SBATCH --gres=gpu:3g.71gb:1
 #SBATCH --mem=32G
 #SBATCH --time=01:30:00
 #SBATCH --output=benchmark_detailed_slurm_%j.log
@@ -14,8 +11,9 @@ set -euo pipefail
 
 HW1_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$HW1_DIR/.." && pwd)"
-RUN_DIR="$HW1_DIR/benchmark_runs/detailed_${SLURM_JOB_ID}"
-DOC_COPY="$REPO_DIR/docs/h200_detailed_component_benchmark_job_${SLURM_JOB_ID}.md"
+JOB_TOKEN="${SLURM_JOB_ID:-local_$(date +%Y%m%d_%H%M%S)}"
+RUN_DIR="$HW1_DIR/benchmark_runs/detailed_${JOB_TOKEN}"
+DOC_COPY="$REPO_DIR/docs/h200_detailed_component_benchmark_job_${JOB_TOKEN}.md"
 
 mkdir -p "$RUN_DIR"
 cd "$HW1_DIR"
@@ -100,7 +98,7 @@ lines = []
 lines.append("# H200 Detailed Component Benchmark")
 lines.append("")
 lines.append(f"- Job ID: `{run_dir.name.split('_')[-1]}`")
-lines.append("- GPU: H200 MIG 3g.71gb on `saxa`")
+lines.append("- Hardware: see `job_metadata.txt` for the runtime GPU and host.")
 lines.append(
     "- Script: "
     f"`hw1-asr/benchmark_detailed.py --runs {component_runs} "

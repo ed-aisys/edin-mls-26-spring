@@ -10,7 +10,7 @@ the benchmark evidence used on the submission branch.
 - Benchmark provenance manual: `benchmarks/benchmarks_README.md`
 - Report-to-benchmark map: `benchmarks/benchmark_provenance.md`
 
-The cleanup branch is the maintained report branch. The canonical benchmark docs
+This submission branch is the maintained report branch. The canonical benchmark docs
 record the exact branch/commit used for each historical benchmark job. For any
 new reproduction run, record the current checkout explicitly with:
 
@@ -61,21 +61,31 @@ source utils/setup-triton.sh
 
 That script installs the Python stack. It is the installation entry point.
 
-## Saxa / H200 Runtime Environment
+## Runtime Environment Helper
 
-For cluster reproduction on `saxa`, source the small runtime helper from the
-repo root:
+For cluster or workstation reproduction, source the small runtime helper from
+the repo root:
 
 ```bash
 source hw1-asr/setup_saxa_env.sh ./hw1-asr/.repro_env
 ```
 
-That helper does not install packages. It codifies the runtime environment we
-actually used for H200 jobs, relative to the current checkout:
+That helper does not install packages. It codifies a checkout-relative runtime
+environment for benchmark runs:
 
+- optional conda env autodiscovery via `$HOME`
 - `TMPDIR`, `TMP`, `TEMP`
 - `TRITON_CACHE_DIR`
 - `TORCH_EXTENSIONS_DIR`
+- `HF_HOME` (defaults to `$HOME/.cache/huggingface`)
+
+Optional overrides:
+
+- `MLS_CONDA_ENV_NAME`
+- `MLS_CONDA_ENV_BIN`
+- `MLS_HF_HOME`
+- `MLS_REPO_DIR`
+- `MLS_HW1_DIR`
 
 ## Exact Benchmark Entry Points
 
@@ -149,6 +159,17 @@ python3 ablation_test.py
 ```bash
 sbatch hw1-asr/flash_vs_three_kernel_job.sh
 ```
+
+For batch jobs on a specific cluster, pass resource selection via `sbatch`
+arguments or the wrapper environment variables:
+
+- `MLS_PARTITION`
+- `MLS_NODELIST`
+- `MLS_GRES`
+- `MLS_MEM`
+- `MLS_TIME`
+- `MLS_MAIL_TYPE`
+- `MLS_MAIL_USER`
 
 That job compares:
 
