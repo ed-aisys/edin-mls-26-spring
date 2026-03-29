@@ -8,11 +8,11 @@ This file is the canonical source for Section 5.3
 | Item | Value |
 |------|-------|
 | Canonical script | `hw1-asr/flash_vs_three_kernel_job.sh` |
-| Job ID | `2237998` |
-| Date | `Sun 29 Mar 02:33 BST 2026` |
+| Job ID | `2238022` |
+| Date | `Sun 29 Mar 03:18 BST 2026` |
 | Branch / commit | `ankush` / `8202f955868cb0c76b8b71f45adc794a1f3c10ee` |
 | Compared modes | `GLM_ASR_ATTENTION_MODE=auto` vs `GLM_ASR_ATTENTION_MODE=three_kernel` |
-| Raw bundle | `../logs/h200_attention_2237998/` |
+| Raw bundle | `../logs/h200_attention_2238022/` |
 
 ## What The Canonical Script Measures
 
@@ -31,25 +31,28 @@ fixed while changing only the attention backend.
 
 ## Raw Artifacts
 
-- [job_metadata.txt](../logs/h200_attention_2237998/job_metadata.txt)
-- [auto_student.log](../logs/h200_attention_2237998/auto_student.log)
-- [three_kernel_student.log](../logs/h200_attention_2237998/three_kernel_student.log)
-- [auto_detailed.log](../logs/h200_attention_2237998/auto_detailed.log)
-- [three_kernel_detailed.log](../logs/h200_attention_2237998/three_kernel_detailed.log)
-- [comparison_summary.json](../logs/h200_attention_2237998/comparison_summary.json)
-- [comparison_summary.md](../logs/h200_attention_2237998/comparison_summary.md)
+- [job_metadata.txt](../logs/h200_attention_2238022/job_metadata.txt)
+- [auto_student.log](../logs/h200_attention_2238022/auto_student.log)
+- [three_kernel_student.log](../logs/h200_attention_2238022/three_kernel_student.log)
+- [auto_detailed.log](../logs/h200_attention_2238022/auto_detailed.log)
+- [three_kernel_detailed.log](../logs/h200_attention_2238022/three_kernel_detailed.log)
+- [comparison_summary.json](../logs/h200_attention_2238022/comparison_summary.json)
+- [comparison_summary.md](../logs/h200_attention_2238022/comparison_summary.md)
 
 ## Final Same-Codebase Results
 
 ### End-to-End Student Benchmark
 
-This job ran one end-to-end benchmark invocation per mode, with `2` warmup runs
-and `5` timed runs inside each invocation.
+This job used the updated end-to-end methodology:
+
+- each benchmark pass used `2` warmup runs and `5` timed runs
+- `1` full benchmark pass was discarded
+- the final number averages `3` measured benchmark passes
 
 | Mode | Mean (ms) | Std (ms) | Accuracy |
 |------|----------:|---------:|---------:|
-| Current deployed path (`auto`) | 219.8 | 2.1 | 100.0% |
-| Reintroduced 3-kernel path (`three_kernel`) | 207.0 | 0.9 | 100.0% |
+| Current deployed path (`auto`) | 210.9 | 2.1 | 100.0% |
+| Reintroduced 3-kernel path (`three_kernel`) | 212.0 | 2.0 | 100.0% |
 
 ### Warmup-Corrected Detailed Benchmark
 
@@ -58,25 +61,33 @@ This job also ran the detailed benchmark with `--runs 5 --warmup-benchmarks 1
 
 | Component | Current path (ms) | Three-kernel path (ms) | Relative |
 |-----------|------------------:|-----------------------:|---------:|
-| Audio Encoder | 36.33 | 36.33 | 1.00x |
-| Multi-modal Projector | 0.15 | 0.15 | 1.00x |
-| Decoder (Prefill) | 12.86 | 13.37 | 1.04x |
-| Decoder (50 decode steps) | 575.64 | 601.65 | 1.05x |
-| **TOTAL (estimated for 50 tokens)** | **624.98** | **651.51** | **1.04x** |
+| Audio Encoder | 36.19 | 36.18 | 1.00x |
+| Multi-modal Projector | 0.14 | 0.15 | 1.07x |
+| Decoder (Prefill) | 12.82 | 13.36 | 1.04x |
+| Decoder (50 decode steps) | 575.89 | 591.41 | 1.03x |
+| **TOTAL (estimated for 50 tokens)** | **625.04** | **641.09** | **1.03x** |
 
 ## Report Guidance
 
-The two measurements do not tell the same story:
+The rerun now gives a consistent same-codebase result:
 
-- the end-to-end student benchmark measured `219.8 ms` for the current deployed
-  path and `207.0 ms` for the reintroduced 3-kernel path
-- the warmup-corrected detailed benchmark measured lower isolated component time
-  for the current deployed path (`624.98 ms` vs `651.51 ms`)
+- the end-to-end student benchmark is slightly faster for the current deployed
+  path (`210.9 ms` vs `212.0 ms`)
+- the warmup-corrected detailed benchmark is also lower for the current path
+  (`625.04 ms` vs `641.09 ms`)
 
-Because of that, Section 5.3 should not present a single universal
-"flash-vs-3-kernel speedup" number. The evidence-backed statement is that the
-same-codebase comparison is now reproducible, and it produced mixed end-to-end
-versus operator-level results on H200.
+Section 5.3 should still present this as a modest improvement rather than a
+dramatic standalone headline result. The evidence-backed statement is that, on
+H200 MIG 3g.71gb, the current deployed attention strategy is slightly but
+consistently faster than the reintroduced 3-kernel/materialized-score path in
+the same codebase.
+
+## Superseded Earlier Same-Codebase Run
+
+The previous same-codebase job `2237998` remains archived in
+`../logs/h200_attention_2237998/`, but it used a weaker end-to-end methodology
+and produced a mixed result. Job `2238022` supersedes it as the canonical
+Section 5.3 evidence.
 
 ## Historical Evidence Preserved During Cleanup
 

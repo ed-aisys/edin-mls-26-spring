@@ -12,7 +12,7 @@ This folder is the canonical entry point for benchmark evidence used by
 | `benchmarks_ablation.md` | H200 ablation benchmark summary | Generated-artifact-backed (`hw1-asr/ablation_results.{json,md}`, `hw1-asr/ablation_output.log`) | Table `tab:ablation`, ablation discussion in Sections 4 and 6 |
 | `benchmarks_5090.md` | RTX 5090 confirmation rerun | Embedded console transcript in doc | RTX 5090 row of Table `tab:crossgpu_main`, headline RTX 5090 number |
 | `benchmarks_history.md` | Original RTX 5090 development benchmark chain | History-backed, extracted from pre-cleanup docs | Appendix Table `tab:progression`, Appendix Table `tab:rejected` |
-| `benchmarks_attention.md` | Section 5.3 attention-backend evidence | Raw log-backed (`logs/h200_attention_2237998/`) | Section 5.3 (`FlashAttention-Style Attention`) |
+| `benchmarks_attention.md` | Section 5.3 attention-backend evidence | Raw log-backed (`logs/h200_attention_2238022/`) | Section 5.3 (`FlashAttention-Style Attention`) |
 | `benchmark_provenance.md` | Report-facing provenance matrix | Consolidated index | All benchmark-backed report claims |
 
 ## Raw Artifact Locations
@@ -21,7 +21,8 @@ This folder is the canonical entry point for benchmark evidence used by
 |------|------------------|
 | `../logs/h200_e2e_2225992/benchmark_raw_output.txt` | Raw H200 end-to-end transcript for `glm_asr_triton_template` plus the H200 baseline benchmark |
 | `../logs/h200_detailed_2236079/` | Warmup-corrected H200 detailed benchmark bundle (`job_metadata`, SLURM log, template log, baseline log, parsed summaries) |
-| `../logs/h200_attention_2237998/` | Same-codebase H200 attention-backend comparison bundle for Section 5.3 (`auto` vs `three_kernel`) |
+| `../logs/h200_attention_2238022/` | Canonical same-codebase H200 attention-backend comparison bundle for Section 5.3 (`auto` vs `three_kernel`) |
+| `../logs/h200_attention_2237998/` | Older superseded same-codebase H200 attention-backend comparison bundle kept for history |
 | `../hw1-asr/ablation_results.json` | Structured H200 ablation results |
 | `../hw1-asr/ablation_results.md` | Human-readable H200 ablation results |
 | `../hw1-asr/ablation_output.log` | Raw console output for the successful H200 ablation run |

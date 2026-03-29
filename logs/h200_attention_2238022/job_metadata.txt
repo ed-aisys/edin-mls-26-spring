@@ -1,0 +1,16 @@
+=== Flash vs Three-Kernel Benchmark Metadata ===
+Date: Sun Mar 29 03:18:45 BST 2026
+Hostname: saxa.inf.ed.ac.uk
+Job ID: 2238022
+Working directory: /home/s2884198/edin-mls-26-spring/hw1-asr
+Branch: ankush
+Commit: 8202f955868cb0c76b8b71f45adc794a1f3c10ee
+GPU: NVIDIA H200
+Student benchmark args: --warmup 2 --runs 5 --warmup-benchmarks 1 --benchmark-repeats 3
+Detailed benchmark args: --runs 5 --warmup-benchmarks 1 --benchmark-repeats 3
+PyTorch 2.10.0+cu130, GPU: NVIDIA H200 MIG 3g.71gb
+
+=== Flash vs Three-Kernel Benchmark Complete ===
+Date: Sun Mar 29 03:25:03 BST 2026
+Run directory: /home/s2884198/edin-mls-26-spring/hw1-asr/attention_mode_runs/flash_vs_three_kernel_2238022
+Summary copy: /home/s2884198/edin-mls-26-spring/docs/flash_vs_three_kernel_job_2238022.md

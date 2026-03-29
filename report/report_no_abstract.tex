@@ -388,9 +388,9 @@ Causal masking is handled via a compile-time \texttt{IS\_CAUSAL} flag that skips
 
 \textbf{Result:} \latestchglabel
 
-\latestchgblock{We later reintroduced the original 3-kernel path behind \texttt{GLM\_ASR\_ATTENTION\_MODE=three\_kernel} and benchmarked it against the current deployed path (\texttt{auto}: flash kernel for larger \texttt{seq\_q}, SDPA fallback for \texttt{seq\_q}$\leq$4) on the same H200 codebase.  In the warmup-corrected detailed benchmark, the current path reduces isolated component time from 651.51\,ms to 624.98\,ms (1.04$\times$), with lower prefill (13.37$\rightarrow$12.86\,ms) and 50-step decode cost (601.65$\rightarrow$575.64\,ms).  In the paired end-to-end student benchmark from the same job, however, the current path measured 219.8\,ms while the 3-kernel path measured 207.0\,ms.  We therefore treat this experiment as reproducible operator-level evidence rather than as a single universal end-to-end speedup result.  The clean end-to-end justification for keeping the SDPA fallback remains Table~\ref{tab:ablation}: disabling it costs +3.4\,ms.}
+\latestchgblock{We later reintroduced the original 3-kernel path behind \texttt{GLM\_ASR\_ATTENTION\_MODE=three\_kernel} and benchmarked it against the current deployed path (\texttt{auto}: flash kernel for larger \texttt{seq\_q}, SDPA fallback for \texttt{seq\_q}$\leq$4) on the same H200 codebase.  In the updated same-codebase rerun, the student benchmark now also discards one full cold benchmark pass and averages three measured passes.  Under that methodology, the current path is slightly faster end-to-end (210.9\,ms vs.\ 212.0\,ms) while preserving 100\% accuracy.  The warmup-corrected detailed benchmark tells the same story: isolated component time falls from 641.09\,ms to 625.04\,ms (1.03$\times$), with lower prefill (13.36$\rightarrow$12.82\,ms) and 50-step decode cost (591.41$\rightarrow$575.89\,ms).  We therefore treat FlashAttention-style dispatch as a modest but consistent same-codebase improvement rather than a dramatic standalone headline result.  The clean end-to-end justification for keeping the SDPA fallback remains Table~\ref{tab:ablation}: disabling it costs +3.4\,ms.}
 
-\latestsource{Source: \texttt{benchmarks/benchmarks\_attention.md}; script: \texttt{hw1-asr/flash\_vs\_three\_kernel\_job.sh}; raw logs: \texttt{logs/h200\_attention\_2237998/}.}
+\latestsource{Source: \texttt{benchmarks/benchmarks\_attention.md}; script: \texttt{hw1-asr/flash\_vs\_three\_kernel\_job.sh}; raw logs: \texttt{logs/h200\_attention\_2238022/}.}
 
 \subsection{Other Optimizations}
 
@@ -592,7 +592,7 @@ Warmup autotune & +3.1\,ms & Micro-benchmarks chose suboptimal configs \\
 \texttt{tab:ablation} & \texttt{benchmarks\_ablation.md} & \texttt{ablation\_test.py} / \texttt{ablation\_job.sh} & \texttt{hw1-asr/ablation\_results.\{json,md\}} \\
 \texttt{tab:crossgpu\_main} (H200) & \texttt{benchmarks.md} & \texttt{benchmark\_student.py} & \texttt{logs/h200\_e2e\_2225992/...} \\
 \texttt{tab:crossgpu\_main} (RTX~5090) & \texttt{benchmarks\_5090.md} & \texttt{benchmark\_student.py} & embedded transcript \\
-Section~5.3 & \texttt{benchmarks\_attention.md} & \texttt{flash\_vs\_three\_kernel\_job.sh} & \texttt{logs/h200\_attention\_2237998/...} \\
+Section~5.3 & \texttt{benchmarks\_attention.md} & \texttt{flash\_vs\_three\_kernel\_job.sh} & \texttt{logs/h200\_attention\_2238022/...} \\
 \texttt{tab:progression}, \texttt{tab:rejected} & \texttt{benchmarks\_history.md} & historical development runs & extracted history at \texttt{f8c2f36} \\
 \bottomrule
 \end{tabular}
