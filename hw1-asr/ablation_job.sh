@@ -9,8 +9,6 @@
 #SBATCH --time=02:00:00
 #SBATCH --output=ablation_slurm_%j.log
 #SBATCH --error=ablation_slurm_%j.err
-#SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=ankushburman.ab@gmail.com
 
 set -euo pipefail
 

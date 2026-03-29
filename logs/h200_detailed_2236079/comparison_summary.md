@@ -17,8 +17,8 @@
 
 ## Raw Artifacts
 
-- `/home/s2884198/edin-mls-26-spring/hw1-asr/benchmark_runs/detailed_2236079/job_metadata.txt`
-- `/home/s2884198/edin-mls-26-spring/hw1-asr/benchmark_runs/detailed_2236079/glm_asr_triton_template_detailed.log`
-- `/home/s2884198/edin-mls-26-spring/hw1-asr/benchmark_runs/detailed_2236079/glm_asr_triton_example_detailed.log`
-- `/home/s2884198/edin-mls-26-spring/hw1-asr/benchmark_runs/detailed_2236079/comparison_summary.json`
+- `edin-mls-26-spring/hw1-asr/benchmark_runs/detailed_2236079/job_metadata.txt`
+- `edin-mls-26-spring/hw1-asr/benchmark_runs/detailed_2236079/glm_asr_triton_template_detailed.log`
+- `edin-mls-26-spring/hw1-asr/benchmark_runs/detailed_2236079/glm_asr_triton_example_detailed.log`
+- `edin-mls-26-spring/hw1-asr/benchmark_runs/detailed_2236079/comparison_summary.json`
 

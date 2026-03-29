@@ -347,7 +347,7 @@ def rmsnorm_bf16_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     """
-    RMSNorm with bf16 output (from meave branch, adapted for bf16).
+    RMSNorm with bf16 output (from Person3 branch, adapted for bf16).
     Outputs bfloat16 directly, avoiding fp32→HBM→bf16 round-trip
     when feeding into cuBLAS Linear layers.
     """

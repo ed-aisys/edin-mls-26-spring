@@ -27,10 +27,10 @@
 
 ## Raw Artifacts
 
-- `/home/s2884198/edin-mls-26-spring/hw1-asr/attention_mode_runs/flash_vs_three_kernel_2238022/job_metadata.txt`
-- `/home/s2884198/edin-mls-26-spring/hw1-asr/attention_mode_runs/flash_vs_three_kernel_2238022/auto_student.log`
-- `/home/s2884198/edin-mls-26-spring/hw1-asr/attention_mode_runs/flash_vs_three_kernel_2238022/auto_detailed.log`
-- `/home/s2884198/edin-mls-26-spring/hw1-asr/attention_mode_runs/flash_vs_three_kernel_2238022/three_kernel_student.log`
-- `/home/s2884198/edin-mls-26-spring/hw1-asr/attention_mode_runs/flash_vs_three_kernel_2238022/three_kernel_detailed.log`
-- `/home/s2884198/edin-mls-26-spring/hw1-asr/attention_mode_runs/flash_vs_three_kernel_2238022/comparison_summary.json`
+- `edin-mls-26-spring/hw1-asr/attention_mode_runs/flash_vs_three_kernel_2238022/job_metadata.txt`
+- `edin-mls-26-spring/hw1-asr/attention_mode_runs/flash_vs_three_kernel_2238022/auto_student.log`
+- `edin-mls-26-spring/hw1-asr/attention_mode_runs/flash_vs_three_kernel_2238022/auto_detailed.log`
+- `edin-mls-26-spring/hw1-asr/attention_mode_runs/flash_vs_three_kernel_2238022/three_kernel_student.log`
+- `edin-mls-26-spring/hw1-asr/attention_mode_runs/flash_vs_three_kernel_2238022/three_kernel_detailed.log`
+- `edin-mls-26-spring/hw1-asr/attention_mode_runs/flash_vs_three_kernel_2238022/comparison_summary.json`
 

@@ -99,7 +99,7 @@
 --- a/rope.py
 +++ b/rope.py
 @@ -328,3 +328,3 @@
-     # CUDA fast path: single fused kernel for both Q and K (from meave branch)
+     # CUDA fast path: single fused kernel for both Q and K (from Person3 branch)
 -    if q.is_cuda:
 +    if False and q.is_cuda:
          total_qh = batch * num_q_heads

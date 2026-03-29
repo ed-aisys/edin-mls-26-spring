@@ -74,7 +74,7 @@
       "tokens": 13,
       "status": "PASS",
       "code_diffs": {
-        "rope.py": "--- a/rope.py\n+++ b/rope.py\n@@ -328,3 +328,3 @@\n     # CUDA fast path: single fused kernel for both Q and K (from meave branch)\n-    if q.is_cuda:\n+    if False and q.is_cuda:\n         total_qh = batch * num_q_heads"
+        "rope.py": "--- a/rope.py\n+++ b/rope.py\n@@ -328,3 +328,3 @@\n     # CUDA fast path: single fused kernel for both Q and K (from Person3 branch)\n-    if q.is_cuda:\n+    if False and q.is_cuda:\n         total_qh = batch * num_q_heads"
       }
     },
     {

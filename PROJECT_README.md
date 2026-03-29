@@ -1,7 +1,7 @@
 # Final Project Reproduction Guide
 
 This file is the project-level entry point for reproducing the final report and
-the benchmark evidence used on the `ankush-branch-cleaned-up` branch.
+the benchmark evidence used on the submission branch.
 
 ## Source Of Truth
 
@@ -73,8 +73,6 @@ source hw1-asr/setup_saxa_env.sh ./hw1-asr/.repro_env
 That helper does not install packages. It codifies the runtime environment we
 actually used for H200 jobs, relative to the current checkout:
 
-- `PATH=/home/s2884198/.conda/envs/mls/bin:$PATH`
-- `HF_HOME=/home/s2884198/.cache/huggingface`
 - `TMPDIR`, `TMP`, `TEMP`
 - `TRITON_CACHE_DIR`
 - `TORCH_EXTENSIONS_DIR`

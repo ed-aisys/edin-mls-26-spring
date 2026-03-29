@@ -11,7 +11,6 @@ numbers used in `report/report_no_abstract.tex`.
 | Batch runner | `hw1-asr/benchmark_detailed_job.sh` |
 | Job ID | `2236079` |
 | Date | `Fri 27 Mar 04:54 GMT 2026` |
-| Branch / commit | `ankush` / `8202f955868cb0c76b8b71f45adc794a1f3c10ee` |
 | Compared configs | `glm_asr_triton_template` vs `glm_asr_triton_example` |
 | Args | `--runs 5 --warmup-benchmarks 1 --benchmark-repeats 3` |
 | Raw bundle | `../logs/h200_detailed_2236079/` |

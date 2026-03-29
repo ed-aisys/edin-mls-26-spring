@@ -12,7 +12,6 @@ by the headline RTX 5090 number and Table `tab:crossgpu_main` in
 | Date | `Mon 17 Mar 11:46 UTC 2026` |
 | Host | `5448230d8a1e (RunPod)` |
 | GPU | NVIDIA GeForce RTX 5090 |
-| Branch / commit | `ankush` / `25b1fd9` |
 | Compared configs | `glm_asr_triton_template` vs `glm_asr_triton_example` |
 | Evidence type | Embedded console transcript in this file |
 

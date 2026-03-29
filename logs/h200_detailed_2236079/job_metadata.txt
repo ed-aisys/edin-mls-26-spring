@@ -2,14 +2,11 @@
 Date: Fri Mar 27 04:54:04 GMT 2026
 Hostname: saxa.inf.ed.ac.uk
 Job ID: 2236079
-Working directory: /home/s2884198/edin-mls-26-spring/hw1-asr
-Branch: ankush
-Commit: 8202f955868cb0c76b8b71f45adc794a1f3c10ee
 GPU: NVIDIA H200
 Benchmark args: --runs 5 --warmup-benchmarks 1 --benchmark-repeats 3
 PyTorch 2.10.0+cu130, GPU: NVIDIA H200 MIG 3g.71gb
 
 === Detailed Benchmark Complete ===
 Date: Fri Mar 27 04:58:43 GMT 2026
-Run directory: /home/s2884198/edin-mls-26-spring/hw1-asr/benchmark_runs/detailed_2236079
-Summary copy: /home/s2884198/edin-mls-26-spring/docs/h200_detailed_component_benchmark_job_2236079.md
+Run directory: edin-mls-26-spring/hw1-asr/benchmark_runs/detailed_2236079
+Summary copy: edin-mls-26-spring/docs/h200_detailed_component_benchmark_job_2236079.md

@@ -69,16 +69,16 @@ The tile configuration evolved through 7 commits by 3 contributors:
 
 | Commit | Author | Matmul Tiles | Activation BLOCK_SIZE | Benchmark | Key Change |
 |--------|--------|-------------|----------------------|-----------|------------|
-| `12daf13` | Ankush | 64×64×32 | dynamic `next_power_of_two(hidden_size)` | ~261ms (baseline) | Initial implementation of all 10 kernels |
-| `893eb35` | Majed | 64×64×32 | `@triton.autotune` over {128, 256, 512, 1024} | **+0.7ms** overhead | Added autotune to RMSNorm, LayerNorm, GELU, SiLU |
-| `7f93bfd` | Yash | **128×64×32** | — | SwiGLU **196→83ms** | Tuned tiles for register pressure; fused MLP ops (cuTile branch) |
-| `5d5bc8a` | Yash | **128×128×32** | kept autotune | **+18ms** regression | Added grid swizzling (`GROUP_SIZE_M=8`), bf16 weights |
-| `bdc7690` | Ankush | **128×128×64** | kept autotune | **214ms** (18% faster) | Switched to cuBLAS backend. TILE_K 32→64 |
-| `5e8b191` | Ankush | 128×128×64 | hardcoded **1024** | bundled with docs | Removed autotune, fixed BLOCK_SIZE=1024 for all element-wise kernels |
-| `e496204` | Ankush | per-GPU via `GPUProfile` | 1024 | part of 110ms result | Introduced `_KNOWN_CONFIGS` + dynamic tile computation |
-| `8611863` | Ankush | per-GPU | 1024 | autotune was **101.6 vs 98.5ms** (+3.1ms) | Removed warmup autotune (~110 lines) after it found worse configs |
+| `12daf13` | Person1 | 64×64×32 | dynamic `next_power_of_two(hidden_size)` | ~261ms (baseline) | Initial implementation of all 10 kernels |
+| `893eb35` | Person2 | 64×64×32 | `@triton.autotune` over {128, 256, 512, 1024} | **+0.7ms** overhead | Added autotune to RMSNorm, LayerNorm, GELU, SiLU |
+| `7f93bfd` | Person4 | **128×64×32** | — | SwiGLU **196→83ms** | Tuned tiles for register pressure; fused MLP ops (cuTile branch) |
+| `5d5bc8a` | Person4 | **128×128×32** | kept autotune | **+18ms** regression | Added grid swizzling (`GROUP_SIZE_M=8`), bf16 weights |
+| `bdc7690` | Person1 | **128×128×64** | kept autotune | **214ms** (18% faster) | Switched to cuBLAS backend. TILE_K 32→64 |
+| `5e8b191` | Person1 | 128×128×64 | hardcoded **1024** | bundled with docs | Removed autotune, fixed BLOCK_SIZE=1024 for all element-wise kernels |
+| `e496204` | Person1 | per-GPU via `GPUProfile` | 1024 | part of 110ms result | Introduced `_KNOWN_CONFIGS` + dynamic tile computation |
+| `8611863` | Person1 | per-GPU | 1024 | autotune was **101.6 vs 98.5ms** (+3.1ms) | Removed warmup autotune (~110 lines) after it found worse configs |
 
-**Majed's `@triton.autotune` (`893eb35`)** added 4-config search on element-wise kernels:
+**Person2's `@triton.autotune` (`893eb35`)** added 4-config search on element-wise kernels:
 ```python
 @triton.autotune(
     configs=[
@@ -92,7 +92,7 @@ The tile configuration evolved through 7 commits by 3 contributors:
 ```
 This was applied to `rmsnorm_kernel`, `layernorm_kernel`, `gelu_kernel`, and `silu_kernel`. The tuning warmup added +0.7ms overhead that exceeded any possible gain for these simple pointwise operations. Removed in `5e8b191`.
 
-**Yash's swizzling (`5d5bc8a`)** added `GROUP_SIZE_M` to the fused SwiGLU kernel for L2 cache-friendly tile ordering:
+**Person4's swizzling (`5d5bc8a`)** added `GROUP_SIZE_M` to the fused SwiGLU kernel for L2 cache-friendly tile ordering:
 ```python
 # Grid swizzling logic added to swiglu_fused_kernel
 num_pid_m = tl.cdiv(M, BLOCK_M)
@@ -463,9 +463,9 @@ is an older historical note and should not be used for `report_no_abstract.tex`.
 
 | Branch | Time | Notes |
 |--------|------|-------|
-| ankush | 98.5ms | fp16 pipeline, KV cache, flash attention, cuBLAS, GPUProfile |
-| meave | 127.8ms | fp16 weights, fused RoPE, separate flash_decode_kernel |
-| majed | 187.9ms | cuBLAS, flash attention, @triton.autotune |
+| Person1 | 98.5ms | fp16 pipeline, KV cache, flash attention, cuBLAS, GPUProfile |
+| Person3 | 127.8ms | fp16 weights, fused RoPE, separate flash_decode_kernel |
+| Person2 | 187.9ms | cuBLAS, flash attention, @triton.autotune |
 
 ---
 

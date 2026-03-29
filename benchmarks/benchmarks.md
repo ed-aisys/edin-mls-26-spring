@@ -12,7 +12,6 @@ used by `report/report_no_abstract.tex`.
 | Date | `Mon 16 Mar 21:20:06 GMT 2026` |
 | Node | `saxa.inf.ed.ac.uk` |
 | Job ID | `2225992` |
-| Branch / commit | `ankush` / `288ad9c` |
 | Compared configs | `glm_asr_triton_template` vs `glm_asr_triton_example` |
 
 ## Report Use

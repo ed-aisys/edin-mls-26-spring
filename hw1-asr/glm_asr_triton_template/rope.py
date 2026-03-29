@@ -182,7 +182,7 @@ MAX_ROPE_DIM = 256
 
 
 # ============================================================================
-# Fused RoPE Pair Kernel (from meave branch — single launch for Q+K)
+# Fused RoPE Pair Kernel (from Person3 branch — single launch for Q+K)
 # ============================================================================
 
 @triton.jit
@@ -302,7 +302,7 @@ def apply_rotary_pos_emb(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary position embeddings.
-    On CUDA, uses a single fused Triton kernel launch for both Q and K (from meave branch).
+    On CUDA, uses a single fused Triton kernel launch for both Q and K (from Person3 branch).
     """
     batch, num_q_heads, seq_len, head_dim = q.shape
     _, num_kv_heads, _, _ = k.shape
@@ -325,7 +325,7 @@ def apply_rotary_pos_emb(
     if not sin.is_contiguous():
         sin = sin.contiguous()
 
-    # CUDA fast path: single fused kernel for both Q and K (from meave branch)
+    # CUDA fast path: single fused kernel for both Q and K (from Person3 branch)
     if q.is_cuda:
         total_qh = batch * num_q_heads
         total_kh = batch * num_kv_heads

@@ -10,7 +10,6 @@ This file is the canonical source for Section 5.3
 | Canonical script | `hw1-asr/flash_vs_three_kernel_job.sh` |
 | Job ID | `2238022` |
 | Date | `Sun 29 Mar 03:18 BST 2026` |
-| Branch / commit | `ankush` / `8202f955868cb0c76b8b71f45adc794a1f3c10ee` |
 | Compared modes | `GLM_ASR_ATTENTION_MODE=auto` vs `GLM_ASR_ATTENTION_MODE=three_kernel` |
 | Raw bundle | `../logs/h200_attention_2238022/` |
 
