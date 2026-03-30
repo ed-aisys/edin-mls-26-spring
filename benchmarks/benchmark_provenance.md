@@ -25,7 +25,7 @@ to their exact evidence paths.
 | RTX 5090 cross-GPU comparison row | `100.4` vs `262.2`, `2.61x` | `hw1-asr/benchmark_student.py` | `benchmarks_5090.md` | transcript embedded in `benchmarks_5090.md` | embedded-transcript-backed |
 | Development progression chain | `261.3 -> 98.5` chain | historical development runs, preserved from pre-cleanup docs | `benchmarks_history.md` | extracted from pre-cleanup history at branch base `f8c2f36` | history-backed |
 | Rejected optimization summary | `+18 ms`, `+0.7 ms`, `Crash`, `+6 ms`, `+13 ms`, `+3.1 ms` | historical development runs, preserved from pre-cleanup docs | `benchmarks_history.md` | extracted from pre-cleanup history at branch base `f8c2f36` | history-backed |
-| Same-codebase attention comparison | end-to-end `210.9` vs `212.0`; detailed `625.04` vs `641.09` | `hw1-asr/flash_vs_three_kernel_job.sh` | `benchmarks_attention.md` | `logs/h200_attention_2238022/` | raw-log-backed |
+| Same-codebase attention comparison | end-to-end `210.6-214.1` vs `280.8-291.9`; detailed `628.43-631.42` vs `823.49-826.69` | `hw1-asr/flash_vs_three_kernel_job.sh` | `benchmarks_attention.md` | `logs/h200_attention_2238637/`, `logs/h200_attention_2238638/` | raw-log-backed |
 
 ## Important Historical Notes
 

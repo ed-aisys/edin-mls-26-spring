@@ -15,7 +15,7 @@ For project-level setup and reproduction instructions, start with
 | `benchmarks_ablation.md` | H200 ablation benchmark summary | Generated-artifact-backed (`hw1-asr/ablation_results.{json,md}`, `hw1-asr/ablation_output.log`) | H200 ablation summary and discussion |
 | `benchmarks_5090.md` | RTX 5090 confirmation rerun | Embedded console transcript in doc | RTX 5090 cross-GPU row, headline RTX 5090 number |
 | `benchmarks_history.md` | Original RTX 5090 development benchmark chain | History-backed, extracted from pre-cleanup docs | Historical progression chain, rejected-optimization summary |
-| `benchmarks_attention.md` | Attention-backend comparison evidence | Raw log-backed (`logs/h200_attention_2238022/`) | Same-codebase `auto` vs `three_kernel` comparison |
+| `benchmarks_attention.md` | Attention-backend comparison evidence | Raw log-backed (`logs/h200_attention_2238637/`, `logs/h200_attention_2238638/`) | Same-codebase `auto` vs `three_kernel` comparison |
 | `benchmark_provenance.md` | Benchmark provenance matrix | Consolidated index | All canonical benchmark-backed claims |
 
 ## Raw Artifact Locations
@@ -24,7 +24,8 @@ For project-level setup and reproduction instructions, start with
 |------|------------------|
 | `../logs/h200_e2e_2225992/benchmark_raw_output.txt` | Raw H200 end-to-end transcript for `glm_asr_triton_template` plus the H200 baseline benchmark |
 | `../logs/h200_detailed_2236079/` | Warmup-corrected H200 detailed benchmark bundle (`job_metadata`, SLURM log, template log, baseline log, parsed summaries) |
-| `../logs/h200_attention_2238022/` | Canonical same-codebase H200 attention-backend comparison bundle (`auto` vs `three_kernel`) |
+| `../logs/h200_attention_2238637/` | First clean same-codebase H200 attention-backend comparison bundle (`auto` vs `three_kernel`) |
+| `../logs/h200_attention_2238638/` | Second clean same-codebase H200 attention-backend comparison bundle (`auto` vs `three_kernel`) |
 | `../logs/h200_attention_2237998/` | Older superseded same-codebase H200 attention-backend comparison bundle kept for history |
 | `../hw1-asr/ablation_results.json` | Structured H200 ablation results |
 | `../hw1-asr/ablation_results.md` | Human-readable H200 ablation results |

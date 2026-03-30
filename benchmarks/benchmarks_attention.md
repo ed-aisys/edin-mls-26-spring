@@ -8,24 +8,24 @@ comparison on the submission branch.
 | Item | Value |
 |------|-------|
 | Canonical script | `hw1-asr/flash_vs_three_kernel_job.sh` |
-| Job ID | `2238022` |
-| Date | `Sun 29 Mar 03:18 BST 2026` |
+| Clean rerun jobs | `2238637`, `2238638` |
+| Date | `Mon 30 Mar 08:56-09:08 BST 2026` |
+| Commit | `7cf521a3456797332a34c647360d9efba5b9d3be` |
 | Compared modes | `GLM_ASR_ATTENTION_MODE=auto` vs `GLM_ASR_ATTENTION_MODE=three_kernel` |
-| Raw bundle | `../logs/h200_attention_2238022/` |
+| Raw bundles | `../logs/h200_attention_2238637/`, `../logs/h200_attention_2238638/` |
 
-## Pending Clean Submission-Branch Verification
+## Clean Reproducibility Verification
 
-To verify the canonical attention-comparison numbers from a clean anonymous submission checkout,
-two identical reruns were submitted from commit `a099081bad074fd0ca1e6612075681bec989b716`
-on `submission-final` using the same canonical script:
+Two identical reruns were executed from a clean anonymous submission-branch
+checkout at commit `7cf521a3456797332a34c647360d9efba5b9d3be`:
 
-- pending verification job `2238320`
-- pending verification job `2238321`
+- clean rerun `2238637`
+- clean rerun `2238638`
 
 These jobs were submitted from fresh cluster worktrees of the pushed submission
-branch, not from a dirty development checkout. Once they complete, their raw
-bundles should be pulled into `logs/` and compared against job `2238022` before
-promoting any new numbers here or in the report.
+branch, not from a dirty development checkout. They agree closely with each
+other and supersede the earlier dirty-checkout result that had previously been
+treated as canonical.
 
 ## What The Canonical Script Measures
 
@@ -55,13 +55,20 @@ against 3-kernel.
 
 ## Raw Artifacts
 
-- [job_metadata.txt](../logs/h200_attention_2238022/job_metadata.txt)
-- [auto_student.log](../logs/h200_attention_2238022/auto_student.log)
-- [three_kernel_student.log](../logs/h200_attention_2238022/three_kernel_student.log)
-- [auto_detailed.log](../logs/h200_attention_2238022/auto_detailed.log)
-- [three_kernel_detailed.log](../logs/h200_attention_2238022/three_kernel_detailed.log)
-- [comparison_summary.json](../logs/h200_attention_2238022/comparison_summary.json)
-- [comparison_summary.md](../logs/h200_attention_2238022/comparison_summary.md)
+- [2238637 job_metadata.txt](../logs/h200_attention_2238637/job_metadata.txt)
+- [2238637 auto_student.log](../logs/h200_attention_2238637/auto_student.log)
+- [2238637 three_kernel_student.log](../logs/h200_attention_2238637/three_kernel_student.log)
+- [2238637 auto_detailed.log](../logs/h200_attention_2238637/auto_detailed.log)
+- [2238637 three_kernel_detailed.log](../logs/h200_attention_2238637/three_kernel_detailed.log)
+- [2238637 comparison_summary.json](../logs/h200_attention_2238637/comparison_summary.json)
+- [2238637 comparison_summary.md](../logs/h200_attention_2238637/comparison_summary.md)
+- [2238638 job_metadata.txt](../logs/h200_attention_2238638/job_metadata.txt)
+- [2238638 auto_student.log](../logs/h200_attention_2238638/auto_student.log)
+- [2238638 three_kernel_student.log](../logs/h200_attention_2238638/three_kernel_student.log)
+- [2238638 auto_detailed.log](../logs/h200_attention_2238638/auto_detailed.log)
+- [2238638 three_kernel_detailed.log](../logs/h200_attention_2238638/three_kernel_detailed.log)
+- [2238638 comparison_summary.json](../logs/h200_attention_2238638/comparison_summary.json)
+- [2238638 comparison_summary.md](../logs/h200_attention_2238638/comparison_summary.md)
 
 ## Final Same-Codebase Results
 
@@ -73,45 +80,42 @@ This job used the updated end-to-end methodology:
 - `1` full benchmark pass was discarded
 - the final number averages `3` measured benchmark passes
 
-| Mode | Mean (ms) | Std (ms) | Accuracy |
-|------|----------:|---------:|---------:|
-| Current deployed path (`auto`) | 210.9 | 2.1 | 100.0% |
-| Reintroduced 3-kernel path (`three_kernel`) | 212.0 | 2.0 | 100.0% |
+| Job | Auto (ms) | Three-kernel (ms) | Relative | Accuracy |
+|-----|----------:|------------------:|---------:|---------:|
+| `2238637` | 214.1 | 291.9 | 1.36x slower | 100.0% |
+| `2238638` | 210.6 | 280.8 | 1.33x slower | 100.0% |
 
 ### Warmup-Corrected Detailed Benchmark
 
 This job also ran the detailed benchmark with `--runs 5 --warmup-benchmarks 1
 --benchmark-repeats 3`.
 
-| Component | Current path (ms) | Three-kernel path (ms) | Relative |
-|-----------|------------------:|-----------------------:|---------:|
-| Audio Encoder | 36.19 | 36.18 | 1.00x |
-| Multi-modal Projector | 0.14 | 0.15 | 1.07x |
-| Decoder (Prefill) | 12.82 | 13.36 | 1.04x |
-| Decoder (50 decode steps) | 575.89 | 591.41 | 1.03x |
-| **TOTAL (estimated for 50 tokens)** | **625.04** | **641.09** | **1.03x** |
+| Job | Auto total (ms) | Three-kernel total (ms) | Prefill (ms) | Decode-50 (ms) | Relative |
+|-----|----------------:|------------------------:|-------------:|---------------:|---------:|
+| `2238637` | 628.43 | 826.69 | 13.15 vs 17.59 | 578.67 vs 745.70 | 1.32x slower |
+| `2238638` | 631.42 | 823.49 | 12.96 vs 17.55 | 581.82 vs 742.55 | 1.30x slower |
 
 ## Report Guidance
 
-The rerun now gives a consistent same-codebase result:
+The two clean reruns now give a consistent same-codebase result:
 
-- the end-to-end student benchmark is slightly faster for the current deployed
-  path (`210.9 ms` vs `212.0 ms`)
-- the warmup-corrected detailed benchmark is also lower for the current path
-  (`625.04 ms` vs `641.09 ms`)
+- the end-to-end student benchmark is consistently faster for the current
+  deployed path (`210.6-214.1 ms` vs `280.8-291.9 ms`)
+- the warmup-corrected detailed benchmark is also much lower for the current
+  path (`628.43-631.42 ms` vs `823.49-826.69 ms`)
 
-This comparison should still be presented as a modest improvement rather than a
-dramatic standalone headline result. The evidence-backed statement is that, on
-H200 MIG 3g.71gb, the current deployed attention strategy is slightly but
-consistently faster than the reintroduced 3-kernel/materialized-score path in
-the same codebase.
+The evidence-backed statement is now stronger: on H200 MIG 3g.71gb, the current
+deployed mixed attention strategy is substantially faster than the reintroduced
+3-kernel/materialized-score path in the same codebase, while preserving 100%
+accuracy.
 
 ## Superseded Earlier Same-Codebase Run
 
 The previous same-codebase job `2237998` remains archived in
 `../logs/h200_attention_2237998/`, but it used a weaker end-to-end methodology
-and produced a mixed result. Job `2238022` supersedes it as the canonical
-attention-comparison evidence.
+and produced a mixed result. The old `2238022` result is no longer treated as
+canonical because it did not come from a clean committed checkout. The clean
+reruns `2238637` and `2238638` supersede it.
 
 ## Historical Evidence Preserved During Cleanup
 

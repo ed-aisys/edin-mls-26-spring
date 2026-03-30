@@ -12,7 +12,7 @@ Creating Triton model with config:
   Audio: hidden=1280, heads=20, layers=32
   Text: hidden=2048, heads=16, kv_heads=4, layers=28
 Loading HuggingFace weights...
-Loading weights:   0%|          | 0/745 [00:00<?, ?it/s]Loading weights:   9%|▉         | 68/745 [00:00<00:01, 599.41it/s]Loading weights:  17%|█▋        | 130/745 [00:00<00:01, 592.46it/s]Loading weights:  26%|██▌       | 190/745 [00:00<00:00, 591.92it/s]Loading weights:  34%|███▎      | 250/745 [00:00<00:00, 558.22it/s]Loading weights:  42%|████▏     | 310/745 [00:00<00:00, 567.93it/s]Loading weights:  49%|████▉     | 367/745 [00:00<00:00, 567.55it/s]Loading weights:  57%|█████▋    | 424/745 [00:00<00:00, 560.47it/s]Loading weights:  65%|██████▍   | 481/745 [00:00<00:00, 562.86it/s]Loading weights:  72%|███████▏  | 538/745 [00:01<00:01, 195.47it/s]Loading weights:  78%|███████▊  | 580/745 [00:01<00:00, 175.44it/s]Loading weights:  82%|████████▏ | 613/745 [00:02<00:00, 169.29it/s]Loading weights:  86%|████████▌ | 641/745 [00:02<00:00, 164.89it/s]Loading weights:  89%|████████▉ | 665/745 [00:02<00:00, 154.90it/s]Loading weights:  92%|█████████▏| 686/745 [00:02<00:00, 158.39it/s]Loading weights:  95%|█████████▍| 706/745 [00:02<00:00, 146.88it/s]Loading weights:  97%|█████████▋| 724/745 [00:02<00:00, 151.14it/s]Loading weights:  99%|█████████▉| 741/745 [00:02<00:00, 152.88it/s]Loading weights: 100%|██████████| 745/745 [00:03<00:00, 246.62it/s]
+Loading weights:   0%|          | 0/745 [00:00<?, ?it/s]Loading weights:   9%|▉         | 68/745 [00:00<00:01, 653.72it/s]Loading weights:  18%|█▊        | 134/745 [00:00<00:01, 596.89it/s]Loading weights:  26%|██▌       | 194/745 [00:00<00:00, 576.51it/s]Loading weights:  34%|███▍      | 252/745 [00:00<00:00, 575.20it/s]Loading weights:  42%|████▏     | 310/745 [00:00<00:00, 546.79it/s]Loading weights:  49%|████▉     | 368/745 [00:00<00:00, 541.22it/s]Loading weights:  57%|█████▋    | 428/745 [00:00<00:00, 536.00it/s]Loading weights:  65%|██████▌   | 487/745 [00:01<00:01, 212.33it/s]Loading weights:  72%|███████▏  | 535/745 [00:01<00:00, 238.77it/s]Loading weights:  77%|███████▋  | 574/745 [00:01<00:00, 210.82it/s]Loading weights:  81%|████████▏ | 606/745 [00:02<00:00, 194.61it/s]Loading weights:  85%|████████▍ | 633/745 [00:02<00:00, 183.30it/s]Loading weights:  88%|████████▊ | 656/745 [00:02<00:00, 166.80it/s]Loading weights:  91%|█████████ | 676/745 [00:02<00:00, 161.01it/s]Loading weights:  93%|█████████▎| 695/745 [00:02<00:00, 161.04it/s]Loading weights:  96%|█████████▌| 713/745 [00:02<00:00, 154.99it/s]Loading weights:  98%|█████████▊| 730/745 [00:02<00:00, 141.39it/s]Loading weights: 100%|██████████| 745/745 [00:02<00:00, 249.62it/s]
 Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
 Loading audio encoder weights...
 Loading multi-modal projector weights...
@@ -32,23 +32,23 @@ DETAILED OPERATOR PROFILING (TORCH)
 ======================================================================
 
 [1/4] Profiling Audio Encoder...
-  Audio Encoder: 257.91ms (+/- 443.57ms)
+  Audio Encoder: 249.66ms (+/- 372.55ms)
 
 [2/4] Profiling Multi-modal Projector...
-  Projector: 4.77ms (+/- 9.23ms)
+  Projector: 4.08ms (+/- 7.86ms)
 
 [3/4] Profiling Text Decoder (Prefill)...
-  Decoder Prefill: 189.49ms (+/- 352.44ms)
+  Decoder Prefill: 186.11ms (+/- 336.95ms)
 
 [4/4] Profiling Decode Steps...
-  Decode Step (avg): 13.47ms (+/- 4.13ms)
+  Decode Step (avg): 127.22ms (+/- 336.77ms)
 
 [5] Profiling Individual Decoder Layers...
-  Layer 0: 0.57ms (+/- 0.12ms)
-  Layer 1: 0.48ms (+/- 0.02ms)
-  Layer 2: 0.48ms (+/- 0.02ms)
-  Layer 3: 0.47ms (+/- 0.01ms)
-  Layer 4: 0.49ms (+/- 0.02ms)
+  Layer 0: 0.75ms (+/- 0.13ms)
+  Layer 1: 0.65ms (+/- 0.02ms)
+  Layer 2: 0.65ms (+/- 0.01ms)
+  Layer 3: 0.65ms (+/- 0.02ms)
+  Layer 4: 0.66ms (+/- 0.02ms)
 
 ======================================================================
 BENCHMARK PASS 2/4 (measured 1/3)
@@ -59,23 +59,23 @@ DETAILED OPERATOR PROFILING (TORCH)
 ======================================================================
 
 [1/4] Profiling Audio Encoder...
-  Audio Encoder: 36.21ms (+/- 0.21ms)
+  Audio Encoder: 63.31ms (+/- 0.20ms)
 
 [2/4] Profiling Multi-modal Projector...
-  Projector: 0.15ms (+/- 0.03ms)
+  Projector: 0.14ms (+/- 0.02ms)
 
 [3/4] Profiling Text Decoder (Prefill)...
-  Decoder Prefill: 12.98ms (+/- 0.14ms)
+  Decoder Prefill: 17.57ms (+/- 0.12ms)
 
 [4/4] Profiling Decode Steps...
-  Decode Step (avg): 11.57ms (+/- 0.08ms)
+  Decode Step (avg): 14.91ms (+/- 0.15ms)
 
 [5] Profiling Individual Decoder Layers...
-  Layer 0: 0.49ms (+/- 0.03ms)
-  Layer 1: 0.48ms (+/- 0.02ms)
-  Layer 2: 0.48ms (+/- 0.02ms)
-  Layer 3: 0.47ms (+/- 0.01ms)
-  Layer 4: 0.56ms (+/- 0.11ms)
+  Layer 0: 0.66ms (+/- 0.04ms)
+  Layer 1: 0.64ms (+/- 0.01ms)
+  Layer 2: 0.65ms (+/- 0.02ms)
+  Layer 3: 0.64ms (+/- 0.01ms)
+  Layer 4: 0.65ms (+/- 0.02ms)
 
 ======================================================================
 BENCHMARK PASS 3/4 (measured 2/3)
@@ -86,23 +86,23 @@ DETAILED OPERATOR PROFILING (TORCH)
 ======================================================================
 
 [1/4] Profiling Audio Encoder...
-  Audio Encoder: 36.17ms (+/- 0.03ms)
+  Audio Encoder: 63.22ms (+/- 0.05ms)
 
 [2/4] Profiling Multi-modal Projector...
-  Projector: 0.15ms (+/- 0.03ms)
+  Projector: 0.14ms (+/- 0.02ms)
 
 [3/4] Profiling Text Decoder (Prefill)...
-  Decoder Prefill: 13.65ms (+/- 0.23ms)
+  Decoder Prefill: 17.57ms (+/- 0.13ms)
 
 [4/4] Profiling Decode Steps...
-  Decode Step (avg): 12.17ms (+/- 0.06ms)
+  Decode Step (avg): 14.85ms (+/- 0.07ms)
 
 [5] Profiling Individual Decoder Layers...
-  Layer 0: 0.51ms (+/- 0.03ms)
-  Layer 1: 0.50ms (+/- 0.03ms)
-  Layer 2: 0.50ms (+/- 0.02ms)
-  Layer 3: 0.50ms (+/- 0.03ms)
-  Layer 4: 0.49ms (+/- 0.03ms)
+  Layer 0: 0.66ms (+/- 0.03ms)
+  Layer 1: 0.64ms (+/- 0.02ms)
+  Layer 2: 0.66ms (+/- 0.02ms)
+  Layer 3: 0.64ms (+/- 0.02ms)
+  Layer 4: 0.64ms (+/- 0.02ms)
 
 ======================================================================
 BENCHMARK PASS 4/4 (measured 3/3)
@@ -113,23 +113,23 @@ DETAILED OPERATOR PROFILING (TORCH)
 ======================================================================
 
 [1/4] Profiling Audio Encoder...
-  Audio Encoder: 36.15ms (+/- 0.03ms)
+  Audio Encoder: 63.23ms (+/- 0.05ms)
 
 [2/4] Profiling Multi-modal Projector...
-  Projector: 0.14ms (+/- 0.03ms)
+  Projector: 0.13ms (+/- 0.02ms)
 
 [3/4] Profiling Text Decoder (Prefill)...
-  Decoder Prefill: 13.44ms (+/- 0.17ms)
+  Decoder Prefill: 17.51ms (+/- 0.12ms)
 
 [4/4] Profiling Decode Steps...
-  Decode Step (avg): 11.74ms (+/- 0.13ms)
+  Decode Step (avg): 14.79ms (+/- 0.07ms)
 
 [5] Profiling Individual Decoder Layers...
-  Layer 0: 0.49ms (+/- 0.04ms)
-  Layer 1: 0.48ms (+/- 0.02ms)
-  Layer 2: 0.48ms (+/- 0.02ms)
-  Layer 3: 0.48ms (+/- 0.01ms)
-  Layer 4: 0.47ms (+/- 0.02ms)
+  Layer 0: 0.66ms (+/- 0.03ms)
+  Layer 1: 0.65ms (+/- 0.02ms)
+  Layer 2: 0.64ms (+/- 0.01ms)
+  Layer 3: 0.65ms (+/- 0.03ms)
+  Layer 4: 0.64ms (+/- 0.02ms)
 
 ======================================================================
 AGGREGATED PERFORMANCE SUMMARY (3 measured benchmarks, 1 warmup discarded)
@@ -137,9 +137,9 @@ AGGREGATED PERFORMANCE SUMMARY (3 measured benchmarks, 1 warmup discarded)
 
 Component                              Time (ms)   % of Total
 ------------------------------------------------------------
-Audio Encoder                            36.18ms        5.6%
-Multi-modal Projector                     0.15ms        0.0%
-Decoder (Prefill)                        13.36ms        2.1%
-Decoder (50 decode steps)               591.41ms       92.3%
+Audio Encoder                            63.25ms        7.7%
+Multi-modal Projector                     0.14ms        0.0%
+Decoder (Prefill)                        17.55ms        2.1%
+Decoder (50 decode steps)               742.55ms       90.2%
 ------------------------------------------------------------
-TOTAL (estimated for 50 tokens)         641.09ms
+TOTAL (estimated for 50 tokens)         823.49ms

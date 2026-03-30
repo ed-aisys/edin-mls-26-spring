@@ -1,0 +1,145 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+======================================================================
+GLM-ASR Detailed Operator Profiling
+======================================================================
+
+Loading test audio...
+Audio: 3.50s @ 16000Hz
+
+Loading model from glm_asr_triton_template...
+Attention mode: auto
+Loading HuggingFace model: zai-org/GLM-ASR-Nano-2512
+Creating Triton model with config:
+  Audio: hidden=1280, heads=20, layers=32
+  Text: hidden=2048, heads=16, kv_heads=4, layers=28
+Loading HuggingFace weights...
+Loading weights:   0%|          | 0/745 [00:00<?, ?it/s]Loading weights:  13%|█▎        | 98/745 [00:00<00:00, 809.48it/s]Loading weights:  24%|██▍       | 179/745 [00:00<00:00, 703.65it/s]Loading weights:  34%|███▎      | 250/745 [00:00<00:00, 598.73it/s]Loading weights:  42%|████▏     | 311/745 [00:00<00:00, 597.53it/s]Loading weights:  50%|████▉     | 372/745 [00:00<00:00, 581.40it/s]Loading weights:  58%|█████▊    | 431/745 [00:00<00:00, 563.59it/s]Loading weights:  66%|██████▌   | 488/745 [00:01<00:01, 210.42it/s]Loading weights:  72%|███████▏  | 535/745 [00:01<00:00, 238.20it/s]Loading weights:  77%|███████▋  | 575/745 [00:01<00:00, 214.00it/s]Loading weights:  82%|████████▏ | 608/745 [00:02<00:00, 190.47it/s]Loading weights:  85%|████████▌ | 635/745 [00:02<00:00, 177.49it/s]Loading weights:  88%|████████▊ | 658/745 [00:02<00:00, 168.92it/s]Loading weights:  91%|█████████ | 679/745 [00:02<00:00, 161.17it/s]Loading weights:  94%|█████████▎| 698/745 [00:02<00:00, 156.25it/s]Loading weights:  96%|█████████▌| 715/745 [00:02<00:00, 150.71it/s]Loading weights:  98%|█████████▊| 733/745 [00:02<00:00, 147.15it/s]Loading weights: 100%|██████████| 745/745 [00:02<00:00, 253.53it/s]
+Loading audio encoder weights...
+Loading multi-modal projector weights...
+Loading text decoder weights...
+Weight loading complete!
+
+Benchmark configuration: 5 timed runs per component, 1 warmup benchmark passes, 3 measured benchmark passes
+Input features shape: torch.Size([1, 128, 3000])
+Input IDs shape: torch.Size([1, 59])
+
+======================================================================
+BENCHMARK PASS 1/4 (warmup, discarded)
+======================================================================
+
+======================================================================
+DETAILED OPERATOR PROFILING (TORCH)
+======================================================================
+
+[1/4] Profiling Audio Encoder...
+  Audio Encoder: 215.03ms (+/- 356.93ms)
+
+[2/4] Profiling Multi-modal Projector...
+  Projector: 4.66ms (+/- 9.02ms)
+
+[3/4] Profiling Text Decoder (Prefill)...
+  Decoder Prefill: 179.29ms (+/- 332.09ms)
+
+[4/4] Profiling Decode Steps...
+  Decode Step (avg): 12.88ms (+/- 3.62ms)
+
+[5] Profiling Individual Decoder Layers...
+  Layer 0: 0.55ms (+/- 0.08ms)
+  Layer 1: 0.48ms (+/- 0.01ms)
+  Layer 2: 0.48ms (+/- 0.02ms)
+  Layer 3: 0.49ms (+/- 0.02ms)
+  Layer 4: 0.47ms (+/- 0.01ms)
+
+======================================================================
+BENCHMARK PASS 2/4 (measured 1/3)
+======================================================================
+
+======================================================================
+DETAILED OPERATOR PROFILING (TORCH)
+======================================================================
+
+[1/4] Profiling Audio Encoder...
+  Audio Encoder: 36.57ms (+/- 0.21ms)
+
+[2/4] Profiling Multi-modal Projector...
+  Projector: 0.14ms (+/- 0.02ms)
+
+[3/4] Profiling Text Decoder (Prefill)...
+  Decoder Prefill: 12.88ms (+/- 0.11ms)
+
+[4/4] Profiling Decode Steps...
+  Decode Step (avg): 11.65ms (+/- 0.04ms)
+
+[5] Profiling Individual Decoder Layers...
+  Layer 0: 0.49ms (+/- 0.02ms)
+  Layer 1: 0.49ms (+/- 0.02ms)
+  Layer 2: 0.48ms (+/- 0.02ms)
+  Layer 3: 0.49ms (+/- 0.03ms)
+  Layer 4: 0.47ms (+/- 0.01ms)
+
+======================================================================
+BENCHMARK PASS 3/4 (measured 2/3)
+======================================================================
+
+======================================================================
+DETAILED OPERATOR PROFILING (TORCH)
+======================================================================
+
+[1/4] Profiling Audio Encoder...
+  Audio Encoder: 36.45ms (+/- 0.05ms)
+
+[2/4] Profiling Multi-modal Projector...
+  Projector: 0.13ms (+/- 0.01ms)
+
+[3/4] Profiling Text Decoder (Prefill)...
+  Decoder Prefill: 12.97ms (+/- 0.09ms)
+
+[4/4] Profiling Decode Steps...
+  Decode Step (avg): 11.61ms (+/- 0.06ms)
+
+[5] Profiling Individual Decoder Layers...
+  Layer 0: 0.49ms (+/- 0.04ms)
+  Layer 1: 0.48ms (+/- 0.02ms)
+  Layer 2: 0.48ms (+/- 0.01ms)
+  Layer 3: 0.48ms (+/- 0.02ms)
+  Layer 4: 0.47ms (+/- 0.01ms)
+
+======================================================================
+BENCHMARK PASS 4/4 (measured 3/3)
+======================================================================
+
+======================================================================
+DETAILED OPERATOR PROFILING (TORCH)
+======================================================================
+
+[1/4] Profiling Audio Encoder...
+  Audio Encoder: 36.51ms (+/- 0.08ms)
+
+[2/4] Profiling Multi-modal Projector...
+  Projector: 0.14ms (+/- 0.02ms)
+
+[3/4] Profiling Text Decoder (Prefill)...
+  Decoder Prefill: 13.02ms (+/- 0.24ms)
+
+[4/4] Profiling Decode Steps...
+  Decode Step (avg): 11.66ms (+/- 0.04ms)
+
+[5] Profiling Individual Decoder Layers...
+  Layer 0: 0.50ms (+/- 0.04ms)
+  Layer 1: 0.47ms (+/- 0.02ms)
+  Layer 2: 0.48ms (+/- 0.02ms)
+  Layer 3: 0.47ms (+/- 0.02ms)
+  Layer 4: 0.48ms (+/- 0.02ms)
+
+======================================================================
+AGGREGATED PERFORMANCE SUMMARY (3 measured benchmarks, 1 warmup discarded)
+======================================================================
+
+Component                              Time (ms)   % of Total
+------------------------------------------------------------
+Audio Encoder                            36.51ms        5.8%
+Multi-modal Projector                     0.14ms        0.0%
+Decoder (Prefill)                        12.96ms        2.1%
+Decoder (50 decode steps)               581.82ms       92.1%
+------------------------------------------------------------
+TOTAL (estimated for 50 tokens)         631.42ms

@@ -1,0 +1,121 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+======================================================================
+GLM-ASR Student Version Benchmark
+======================================================================
+
+Loading test audio...
+Loaded audio from edin-mls-26-spring/hw1-asr/test_audio.wav
+Audio duration: 3.50s
+Expected: CONCORD RETURNED TO ITS PLACE AMIDST THE TENTS
+
+======================================================================
+Testing: glm_asr_triton_template
+======================================================================
+
+======================================================================
+BENCHMARK PASS 1/4 (warmup, discarded)
+======================================================================
+Loading model from glm_asr_triton_template...
+Attention mode: three_kernel
+Loading HuggingFace model: zai-org/GLM-ASR-Nano-2512
+Creating Triton model with config:
+  Audio: hidden=1280, heads=20, layers=32
+  Text: hidden=2048, heads=16, kv_heads=4, layers=28
+Loading HuggingFace weights...
+Loading weights:   0%|          | 0/745 [00:00<?, ?it/s]Loading weights:  12%|█▏        | 90/745 [00:00<00:00, 872.20it/s]Loading weights:  24%|██▍       | 178/745 [00:00<00:00, 685.66it/s]Loading weights:  33%|███▎      | 249/745 [00:00<00:00, 594.33it/s]Loading weights:  42%|████▏     | 311/745 [00:00<00:00, 568.81it/s]Loading weights:  50%|████▉     | 370/745 [00:00<00:00, 526.26it/s]Loading weights:  59%|█████▉    | 443/745 [00:00<00:00, 562.46it/s]Loading weights:  67%|██████▋   | 500/745 [00:01<00:01, 219.54it/s]Loading weights:  73%|███████▎  | 542/745 [00:01<00:00, 244.89it/s]Loading weights:  78%|███████▊  | 583/745 [00:01<00:00, 203.76it/s]Loading weights:  83%|████████▎ | 616/745 [00:02<00:00, 184.63it/s]Loading weights:  86%|████████▋ | 643/745 [00:02<00:00, 169.78it/s]Loading weights:  89%|████████▉ | 666/745 [00:02<00:00, 173.11it/s]Loading weights:  92%|█████████▏| 688/745 [00:02<00:00, 158.75it/s]Loading weights:  95%|█████████▍| 707/745 [00:02<00:00, 156.60it/s]Loading weights:  97%|█████████▋| 725/745 [00:02<00:00, 153.22it/s]Loading weights: 100%|█████████▉| 743/745 [00:02<00:00, 156.91it/s]Loading weights: 100%|██████████| 745/745 [00:02<00:00, 253.51it/s]
+Loading audio encoder weights...
+Loading multi-modal projector weights...
+Loading text decoder weights...
+Weight loading complete!
+Using generate function: _generate_v8b
+Warmup (2 runs)...
+Benchmarking (5 runs)...
+  Run 1: 293.8ms (13 tokens)
+  Run 2: 289.0ms (13 tokens)
+  Run 3: 288.4ms (13 tokens)
+  Run 4: 288.5ms (13 tokens)
+  Run 5: 289.0ms (13 tokens)
+
+======================================================================
+BENCHMARK PASS 2/4 (measured 1/3)
+======================================================================
+Loading model from glm_asr_triton_template...
+Attention mode: three_kernel
+Loading HuggingFace model: zai-org/GLM-ASR-Nano-2512
+Creating Triton model with config:
+  Audio: hidden=1280, heads=20, layers=32
+  Text: hidden=2048, heads=16, kv_heads=4, layers=28
+Loading HuggingFace weights...
+Loading weights:   0%|          | 0/745 [00:00<?, ?it/s]Loading weights:   7%|▋         | 53/745 [00:00<00:01, 494.76it/s]Loading weights:  15%|█▌        | 113/745 [00:00<00:01, 513.76it/s]Loading weights:  23%|██▎       | 173/745 [00:00<00:01, 546.95it/s]Loading weights:  31%|███       | 228/745 [00:00<00:00, 545.33it/s]Loading weights:  39%|███▉      | 289/745 [00:00<00:00, 546.14it/s]Loading weights:  46%|████▌     | 344/745 [00:00<00:00, 530.23it/s]Loading weights:  54%|█████▍    | 403/745 [00:00<00:00, 545.64it/s]Loading weights:  61%|██████▏   | 458/745 [00:00<00:00, 529.13it/s]Loading weights:  69%|██████▊   | 512/745 [00:01<00:01, 212.74it/s]Loading weights:  74%|███████▍  | 552/745 [00:01<00:00, 206.25it/s]Loading weights:  79%|███████▊  | 585/745 [00:01<00:00, 189.31it/s]Loading weights:  82%|████████▏ | 613/745 [00:02<00:00, 171.59it/s]Loading weights:  85%|████████▌ | 636/745 [00:02<00:00, 159.85it/s]Loading weights:  88%|████████▊ | 656/745 [00:02<00:00, 164.58it/s]Loading weights:  91%|█████████ | 676/745 [00:02<00:00, 162.17it/s]Loading weights:  93%|█████████▎| 695/745 [00:02<00:00, 152.93it/s]Loading weights:  96%|█████████▌| 712/745 [00:02<00:00, 152.35it/s]Loading weights:  98%|█████████▊| 729/745 [00:02<00:00, 148.64it/s]Loading weights: 100%|██████████| 745/745 [00:03<00:00, 246.27it/s]
+Loading audio encoder weights...
+Loading multi-modal projector weights...
+Loading text decoder weights...
+Weight loading complete!
+Using generate function: _generate_v8b
+Warmup (2 runs)...
+Benchmarking (5 runs)...
+  Run 1: 292.7ms (13 tokens)
+  Run 2: 290.5ms (13 tokens)
+  Run 3: 290.4ms (13 tokens)
+  Run 4: 291.2ms (13 tokens)
+  Run 5: 290.0ms (13 tokens)
+
+======================================================================
+BENCHMARK PASS 3/4 (measured 2/3)
+======================================================================
+Loading model from glm_asr_triton_template...
+Attention mode: three_kernel
+Loading HuggingFace model: zai-org/GLM-ASR-Nano-2512
+Creating Triton model with config:
+  Audio: hidden=1280, heads=20, layers=32
+  Text: hidden=2048, heads=16, kv_heads=4, layers=28
+Loading HuggingFace weights...
+Loading weights:   0%|          | 0/745 [00:00<?, ?it/s]Loading weights:   9%|▉         | 70/745 [00:00<00:01, 634.57it/s]Loading weights:  18%|█▊        | 135/745 [00:00<00:00, 643.19it/s]Loading weights:  27%|██▋       | 200/745 [00:00<00:00, 597.73it/s]Loading weights:  35%|███▌      | 261/745 [00:00<00:00, 572.05it/s]Loading weights:  43%|████▎     | 319/745 [00:00<00:00, 544.65it/s]Loading weights:  51%|█████▏    | 383/745 [00:00<00:00, 551.45it/s]Loading weights:  59%|█████▉    | 443/745 [00:00<00:00, 562.47it/s]Loading weights:  67%|██████▋   | 500/745 [00:01<00:01, 209.06it/s]Loading weights:  73%|███████▎  | 544/745 [00:01<00:00, 230.04it/s]Loading weights:  78%|███████▊  | 583/745 [00:01<00:00, 199.10it/s]Loading weights:  82%|████████▏ | 614/745 [00:02<00:00, 184.19it/s]Loading weights:  86%|████████▌ | 640/745 [00:02<00:00, 175.40it/s]Loading weights:  89%|████████▉ | 663/745 [00:02<00:00, 163.49it/s]Loading weights:  92%|█████████▏| 683/745 [00:02<00:00, 158.69it/s]Loading weights:  94%|█████████▍| 702/745 [00:02<00:00, 161.77it/s]Loading weights:  97%|█████████▋| 720/745 [00:02<00:00, 154.62it/s]Loading weights:  99%|█████████▉| 737/745 [00:02<00:00, 146.24it/s]Loading weights: 100%|██████████| 745/745 [00:02<00:00, 250.84it/s]
+Loading audio encoder weights...
+Loading multi-modal projector weights...
+Loading text decoder weights...
+Weight loading complete!
+Using generate function: _generate_v8b
+Warmup (2 runs)...
+Benchmarking (5 runs)...
+  Run 1: 294.9ms (13 tokens)
+  Run 2: 290.9ms (13 tokens)
+  Run 3: 291.7ms (13 tokens)
+  Run 4: 291.3ms (13 tokens)
+  Run 5: 290.4ms (13 tokens)
+
+======================================================================
+BENCHMARK PASS 4/4 (measured 3/3)
+======================================================================
+Loading model from glm_asr_triton_template...
+Attention mode: three_kernel
+Loading HuggingFace model: zai-org/GLM-ASR-Nano-2512
+Creating Triton model with config:
+  Audio: hidden=1280, heads=20, layers=32
+  Text: hidden=2048, heads=16, kv_heads=4, layers=28
+Loading HuggingFace weights...
+Loading weights:   0%|          | 0/745 [00:00<?, ?it/s]Loading weights:  11%|█         | 83/745 [00:00<00:00, 819.33it/s]Loading weights:  22%|██▏       | 165/745 [00:00<00:00, 613.18it/s]Loading weights:  31%|███▏      | 233/745 [00:00<00:00, 612.62it/s]Loading weights:  40%|███▉      | 296/745 [00:00<00:00, 585.15it/s]Loading weights:  48%|████▊     | 356/745 [00:00<00:00, 582.77it/s]Loading weights:  56%|█████▌    | 415/745 [00:00<00:00, 557.13it/s]Loading weights:  64%|██████▍   | 475/745 [00:00<00:00, 542.83it/s]Loading weights:  71%|███████   | 530/745 [00:01<00:00, 219.86it/s]Loading weights:  77%|███████▋  | 571/745 [00:01<00:00, 189.94it/s]Loading weights:  81%|████████  | 603/745 [00:01<00:00, 178.75it/s]Loading weights:  85%|████████▍ | 630/745 [00:02<00:00, 170.40it/s]Loading weights:  88%|████████▊ | 653/745 [00:02<00:00, 162.42it/s]Loading weights:  90%|█████████ | 673/745 [00:02<00:00, 160.06it/s]Loading weights:  93%|█████████▎| 692/745 [00:02<00:00, 154.02it/s]Loading weights:  95%|█████████▌| 709/745 [00:02<00:00, 153.00it/s]Loading weights:  97%|█████████▋| 726/745 [00:02<00:00, 143.43it/s]Loading weights: 100%|██████████| 745/745 [00:02<00:00, 253.33it/s]
+Loading audio encoder weights...
+Loading multi-modal projector weights...
+Loading text decoder weights...
+Weight loading complete!
+Using generate function: _generate_v8b
+Warmup (2 runs)...
+Benchmarking (5 runs)...
+  Run 1: 296.0ms (13 tokens)
+  Run 2: 291.7ms (13 tokens)
+  Run 3: 291.9ms (13 tokens)
+  Run 4: 292.7ms (13 tokens)
+  Run 5: 291.5ms (13 tokens)
+
+======================================================================
+AGGREGATED RESULTS (3 measured benchmark passes, 1 warmup discarded)
+======================================================================
+Time: 291.9ms (+/- 0.7ms)
+Tokens: 13
+Speed: 22.45ms/token
+
+Transcription: Concord returned to its place amidst the tents.
+
+Accuracy: 100.0%
+Status: PASS

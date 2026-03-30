@@ -1,0 +1,30 @@
+{
+  "student": {
+    "auto": {
+      "time_ms": 210.6,
+      "std_ms": 0.3,
+      "accuracy_pct": 100.0
+    },
+    "three_kernel": {
+      "time_ms": 280.8,
+      "std_ms": 0.7,
+      "accuracy_pct": 100.0
+    }
+  },
+  "detailed": {
+    "auto": {
+      "Audio Encoder": 36.51,
+      "Multi-modal Projector": 0.14,
+      "Decoder (Prefill)": 12.96,
+      "Decoder (50 decode steps)": 581.82,
+      "TOTAL (estimated for 50 tokens)": 631.42
+    },
+    "three_kernel": {
+      "Audio Encoder": 63.25,
+      "Multi-modal Projector": 0.14,
+      "Decoder (Prefill)": 17.55,
+      "Decoder (50 decode steps)": 742.55,
+      "TOTAL (estimated for 50 tokens)": 823.49
+    }
+  }
+}
