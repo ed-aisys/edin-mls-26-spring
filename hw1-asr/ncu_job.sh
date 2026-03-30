@@ -10,7 +10,11 @@
 
 set -euo pipefail
 
-HW1_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    HW1_DIR="$(cd "$SLURM_SUBMIT_DIR" && pwd)"
+else
+    HW1_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 JOB_TOKEN="${SLURM_JOB_ID:-local_$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="$HW1_DIR/ncu_runs/ncu_${JOB_TOKEN}"
 mkdir -p "$RUN_DIR"

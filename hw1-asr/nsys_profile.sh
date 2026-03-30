@@ -4,7 +4,11 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    SCRIPT_DIR="$(cd "$SLURM_SUBMIT_DIR" && pwd)"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 RUN_DIR="$SCRIPT_DIR/.nsys_runtime_$(date +%Y%m%d_%H%M%S)"
 source "$SCRIPT_DIR/setup_saxa_env.sh" "$RUN_DIR"
 cd "$SCRIPT_DIR"

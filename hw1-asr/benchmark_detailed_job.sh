@@ -12,7 +12,11 @@
 
 set -euo pipefail
 
-HW1_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+    HW1_DIR="$(cd "$SLURM_SUBMIT_DIR" && pwd)"
+else
+    HW1_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 REPO_DIR="$(cd "$HW1_DIR/.." && pwd)"
 JOB_TOKEN="${SLURM_JOB_ID:-local_$(date +%Y%m%d_%H%M%S)}"
 RUN_DIR="$HW1_DIR/benchmark_runs/detailed_${JOB_TOKEN}"
