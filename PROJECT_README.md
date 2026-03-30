@@ -205,8 +205,8 @@ python3 benchmark_student.py glm_asr_triton_example --warmup 2 --runs 5
 
 - `logs/h200_e2e_2225992/`
 - `logs/h200_detailed_2236079/`
-- `logs/h200_attention_2238022/`
-- `logs/h200_attention_2237998/` (superseded history)
+- `logs/h200_attention_2238637/`
+- `logs/h200_attention_2238638/`
 
 ## What To Read First
 
