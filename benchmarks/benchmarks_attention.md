@@ -109,13 +109,12 @@ deployed mixed attention strategy is substantially faster than the reintroduced
 3-kernel/materialized-score path in the same codebase, while preserving 100%
 accuracy.
 
-## Superseded Earlier Same-Codebase Run
+## Superseded Earlier Same-Codebase Runs
 
-The previous same-codebase job `2237998` remains archived in
-`../logs/h200_attention_2237998/`, but it used a weaker end-to-end methodology
-and produced a mixed result. The old `2238022` result is no longer treated as
-canonical because it did not come from a clean committed checkout. The clean
-reruns `2238637` and `2238638` supersede it.
+An earlier same-codebase job `2237998` used a weaker end-to-end methodology and
+produced a mixed result. The later `2238022` result is also no longer treated
+as canonical because it did not come from a clean committed checkout. The clean
+reruns `2238637` and `2238638` supersede both of those earlier runs.
 
 ## Historical Evidence Preserved During Cleanup
 

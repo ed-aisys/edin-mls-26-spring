@@ -26,7 +26,6 @@ For project-level setup and reproduction instructions, start with
 | `../logs/h200_detailed_2236079/` | Warmup-corrected H200 detailed benchmark bundle (`job_metadata`, SLURM log, template log, baseline log, parsed summaries) |
 | `../logs/h200_attention_2238637/` | First clean same-codebase H200 attention-backend comparison bundle (`auto` vs `three_kernel`) |
 | `../logs/h200_attention_2238638/` | Second clean same-codebase H200 attention-backend comparison bundle (`auto` vs `three_kernel`) |
-| `../logs/h200_attention_2237998/` | Older superseded same-codebase H200 attention-backend comparison bundle kept for history |
 | `../hw1-asr/ablation_results.json` | Structured H200 ablation results |
 | `../hw1-asr/ablation_results.md` | Human-readable H200 ablation results |
 | `../hw1-asr/ablation_output.log` | Raw console output for the successful H200 ablation run |
